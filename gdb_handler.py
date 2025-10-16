@@ -3,7 +3,7 @@ File Geodatabase (FGDB) handling utilities using ArcPy
 """
 
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple, Set
 import arcpy
 
 logger = logging.getLogger("GISIngestion.gdb")
@@ -45,14 +45,18 @@ def get_gdb_layers(gdb_path: str) -> List[str]:
     try:
         arcpy.env.workspace = gdb_path
         layers = arcpy.ListFeatureClasses()
-        logger.info(f"Found {len(layers)} layers in GDB")
-        return layers if layers else []
+        if layers:
+            logger.info(f"Found {len(layers)} layers in GDB")
+            return layers
+        else:
+            logger.info("No layers found in GDB")
+            return []
     except Exception as e:
         logger.error(f"Error getting GDB layers: {e}")
         return []
 
 
-def get_layer_info(gdb_path: str, layer_name: str) -> Dict:
+def get_layer_info(gdb_path: str, layer_name: str) -> Optional[Dict]:
     """
     Get information about a layer (fields, geometry type, etc.)
 
@@ -61,7 +65,7 @@ def get_layer_info(gdb_path: str, layer_name: str) -> Dict:
         layer_name: Layer name inside the GDB
 
     Returns:
-        Dictionary with layer information
+        Dictionary with layer information, or None if error
     """
     try:
         arcpy.env.workspace = gdb_path
@@ -101,42 +105,50 @@ def get_layer_info(gdb_path: str, layer_name: str) -> Dict:
 
     except Exception as e:
         logger.error(f"Error getting layer info for '{layer_name}': {e}")
-        return {}
+        return None
 
 
 def normalize_geometry_type(geom_type: str) -> Optional[str]:
     """
-    Normalize geometry type name for PostgreSQL/PostGIS
+    Normalize geometry type name for ArcPy
 
     Args:
         geom_type: ArcPy geometry type name
 
     Returns:
-        Normalized geometry type for PostGIS
+        Normalized geometry type for ArcPy (uppercase)
     """
+    # Remove 3D/Z/M modifiers
     geom_type = geom_type.replace('3D ', '').replace('ZM', '').replace('Z', '').replace('M', '').strip()
 
     type_mapping = {
         'Point': 'POINT',
         'Multipoint': 'MULTIPOINT',
-        'Polyline': 'LINESTRING',
+        'Polyline': 'POLYLINE',  # Changed from LINESTRING to POLYLINE for ArcPy
         'Polygon': 'POLYGON',
-        'Multipatch': 'GEOMETRYCOLLECTION',
+        'Multipatch': 'MULTIPATCH',  # Changed from GEOMETRYCOLLECTION to MULTIPATCH for ArcPy
     }
 
     return type_mapping.get(geom_type)
 
 
-def compare_layer_fields_with_table(layer_fields: List[Dict], table_columns: List[tuple]) -> bool:
+def compare_layer_fields_with_table(
+    layer_fields: List[Dict], 
+    table_columns: List[tuple],
+    fgdb_name: str,
+    source_directory: str
+) -> Tuple[bool, Set[str], Set[str]]:
     """
     Compare layer fields with existing table columns
 
     Args:
         layer_fields: List of field definitions from layer
         table_columns: List of (column_name, data_type) from table
+        fgdb_name: Name of the FGDB file
+        source_directory: Source directory path
 
     Returns:
-        True if fields match, False otherwise
+        Tuple of (fields_match, layer_exclusive_fields, table_exclusive_fields)
     """
     layer_field_names = set(
         field['name'].lower() for field in layer_fields
@@ -149,11 +161,24 @@ def compare_layer_fields_with_table(layer_fields: List[Dict], table_columns: Lis
         if col[0].lower() not in metadata_columns
     )
 
+    layer_exclusive = layer_field_names - table_field_names
+    table_exclusive = table_field_names - layer_field_names
+
     if layer_field_names == table_field_names:
         logger.debug("Layer fields match table columns")
-        return True
+        return True, set(), set()
     else:
-        logger.warning(f"Field mismatch - Layer: {layer_field_names}, Table: {table_field_names}")
-        logger.warning(f"Missing in table: {layer_field_names - table_field_names}")
-        logger.warning(f"Extra in table: {table_field_names - layer_field_names}")
-        return False
+        # Log warnings in the required format
+        if layer_exclusive:
+            exclusive_list = ', '.join(sorted(layer_exclusive))
+            logger.warning(
+                f"{fgdb_name} from {source_directory} have exclusive columns [{exclusive_list}]"
+            )
+        
+        if table_exclusive:
+            exclusive_list = ', '.join(sorted(table_exclusive))
+            logger.warning(
+                f"Table has exclusive columns not in {fgdb_name} from {source_directory}: [{exclusive_list}]"
+            )
+        
+        return False, layer_exclusive, table_exclusive

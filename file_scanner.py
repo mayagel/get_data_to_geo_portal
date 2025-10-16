@@ -144,20 +144,27 @@ def extract_archive(archive_path: str, extract_to: Optional[str] = None) -> bool
 
 def get_source_directory_name(folder_path: str, folder_prefix: str) -> str:
     """
-    Extract the source directory name (up to and including the A- prefix)
+    Extract the source directory name (up to and including the folder starting with prefix)
     
     Args:
         folder_path: Full path to folder
-        folder_prefix: Prefix to match (e.g., "A-")
+        folder_prefix: Prefix to match (e.g., "-A")
         
     Returns:
-        Source directory path up to the A- folder
+        Full path up to and including the folder that starts with the prefix (e.g., "-A")
     """
+    # Normalize path
+    folder_path = os.path.normpath(folder_path)
     parts = Path(folder_path).parts
     
+    # Find the folder that starts with the prefix
     for i, part in enumerate(parts):
         if part.startswith(folder_prefix):
             # Return path up to and including this folder
-            return str(Path(*parts[:i+1]))
+            result = str(Path(*parts[:i+1]))
+            logger.debug(f"Extracted source directory: {result} from {folder_path}")
+            return result
     
+    # If no match found, return the folder path itself
+    logger.warning(f"No folder with prefix '{folder_prefix}' found in path: {folder_path}")
     return folder_path

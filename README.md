@@ -8,7 +8,7 @@
 
 ### תהליך העבודה:
 
-1. **סריקת תיקיות**: המערכת סורקת את הנתיב `O:\Center\Excavations` ומחפשת תיקיות שמתחילות ב-`A-`
+1. **סריקת תיקיות**: המערכת סורקת את הנתיב `\\iaahq\Archaeological_Documentation\Center\Excavations` ומחפשת תיקיות שמתחילות ב-`-A`
 
 2. **חיפוש משאבי GIS**: בכל תיקייה, המערכת מחפשת:
    - תיקיית `GIS`
@@ -36,7 +36,7 @@
 
 1. **Python 3.8+**
 2. **PostgreSQL/PostGIS**
-3. **GDAL/OGR** - עבור קריאת קבצי GDB
+3. **ArcPy** - עבור קריאת קבצי File Geodatabase (מגיע עם ArcGIS Pro או ArcGIS Desktop)
 
 ### התקנת החבילות:
 
@@ -44,9 +44,7 @@
 pip install -r requirements.txt
 ```
 
-**הערה חשובה**: התקנת GDAL עשויה להיות מסובכת. בסביבת Windows, מומלץ להשתמש ב:
-- Conda: `conda install -c conda-forge gdal`
-- או להוריד wheel files מ-https://www.lfd.uci.edu/~gohlke/pythonlibs/#gdal
+**הערה חשובה**: ArcPy זמין רק עם התקנת ArcGIS Pro או ArcGIS Desktop. ודא שסביבת Python שלך מוגדרת לשימוש ב-ArcPy.
 
 ### התקנת כלי עזר לקבצים דחוסים:
 
@@ -59,17 +57,11 @@ pip install -r requirements.txt
 ערוך את הקובץ `config.py` ועדכן את הפרטים הבאים:
 
 ```python
-# PostgreSQL Configuration
-POSTGRES_CONFIG = DBConfig(
-    host="your_host",
-    user="your_username",
-    password="your_password",
-    db_name="iaagis_prod01",
-    port=5432
-)
+
 
 # File paths
-ROOT_PATH = r"O:\Center\Excavations"
+ROOT_PATH = r"\\iaahq\Archaeological_Documentation\Center\Excavations"
+FOLDER_PREFIX = "-A"  # Look for folders starting with "-A"
 ```
 
 ## הרצה
@@ -110,7 +102,8 @@ logs/gis_ingestion_20250930_143000.log
 ### שגיאה בקריאת GDB
 
 ודא ש:
-- GDAL מותקן כראוי
+- ArcPy מותקן כראוי (מגיע עם ArcGIS Pro)
+- סביבת Python מוגדרת נכון (השתמש בסביבת Python של ArcGIS)
 - יש לך גישה לקובץ ה-GDB
 - הקובץ תקין ולא פגום
 

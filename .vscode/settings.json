@@ -1,0 +1,12 @@
+{
+    "python.defaultInterpreterPath": "C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\envs\\arcgispro-py3\\python.exe",
+    "python.terminal.activateEnvironment": true,
+    "python.analysis.extraPaths": [
+        "C:\\Program Files\\ArcGIS\\Pro\\Resources\\ArcPy"
+    ],
+    "python.autoComplete.extraPaths": [
+        "C:\\Program Files\\ArcGIS\\Pro\\Resources\\ArcPy"
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.pythonProjects": []
+}

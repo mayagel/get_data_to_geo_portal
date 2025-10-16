@@ -8,15 +8,17 @@ from typing import Optional
 from datetime import datetime
 
 # Import local modules
-from config import POSTGRES_CONFIG, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME
+from config import SDE_CONNECTION, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME
 from logger_setup import setup_logger
 from database import (
     connect_to_gis, 
     table_exists, 
     get_table_columns,
+    get_table_geometry_type,
     check_data_already_imported,
     create_table_from_gdb_fields,
-    get_next_batch_id
+    get_next_batch_id,
+    import_features_to_table
 )
 from file_scanner import (
     scan_root_directory,
@@ -39,7 +41,7 @@ logger = setup_logger()
 def process_gdb(
     gdb_path: str,
     source_directory: str,
-    conn,
+    sde_connection: str,
     batch_id: int
 ) -> bool:
     """
@@ -48,7 +50,7 @@ def process_gdb(
     Args:
         gdb_path: Path to .gdb folder
         source_directory: Source directory path (up to A- folder)
-        conn: Database connection
+        sde_connection: SDE connection path
         batch_id: Batch ID for this ingestion run
         
     Returns:
@@ -59,15 +61,15 @@ def process_gdb(
     # Extract FGDB name
     fgdb_name = os.path.basename(gdb_path)
     
-    # Open the GDB
-    datasource = open_fgdb(gdb_path)
-    if datasource is None:
+    # Open/validate the GDB
+    validated_gdb = open_fgdb(gdb_path)
+    if validated_gdb is None:
         logger.error(f"Failed to open GDB: {gdb_path}")
         return False
     
     try:
         # Get all layers
-        layers = get_gdb_layers(datasource)
+        layers = get_gdb_layers(gdb_path)
         
         if not layers:
             logger.warning(f"No layers found in GDB: {gdb_path}")
@@ -77,13 +79,8 @@ def process_gdb(
         for layer_name in layers:
             logger.info(f"Processing layer: {layer_name}")
             
-            layer = datasource.GetLayerByName(layer_name)
-            if layer is None:
-                logger.error(f"Failed to get layer: {layer_name}")
-                continue
-            
             # Get layer information
-            layer_info = get_layer_info(layer)
+            layer_info = get_layer_info(gdb_path, layer_name)
             if not layer_info:
                 logger.error(f"Failed to get layer info: {layer_name}")
                 continue
@@ -92,22 +89,59 @@ def process_gdb(
             table_name = layer_name.lower().replace(' ', '_').replace('-', '_')
             
             # Check if table exists
-            if table_exists(conn, table_name):
+            if table_exists(sde_connection, table_name):
                 logger.info(f"Table '{table_name}' already exists")
                 
                 # Check if data already imported
-                if check_data_already_imported(conn, table_name, source_directory, fgdb_name):
+                if check_data_already_imported(sde_connection, table_name, source_directory, fgdb_name):
                     logger.info(f"Data from '{source_directory}' / '{fgdb_name}' already imported to '{table_name}'. Skipping.")
                     continue
                 
+                # Get normalized geometry type from layer
+                layer_geom_type = normalize_geometry_type(layer_info['geometry_type'])
+                
+                # Get table geometry type
+                table_geom_type = get_table_geometry_type(sde_connection, table_name)
+                
+                # Check if geometry types match
+                if table_geom_type and layer_geom_type:
+                    if table_geom_type.upper() != layer_geom_type.upper():
+                        logger.warning(
+                            f"Geometry type mismatch for table '{table_name}'. "
+                            f"Table has '{table_geom_type}', layer has '{layer_geom_type}'. Skipping layer."
+                        )
+                        continue
+                
                 # Check if fields match
-                table_columns = get_table_columns(conn, table_name)
-                if not compare_layer_fields_with_table(layer_info['fields'], table_columns):
-                    logger.warning(f"Schema mismatch for table '{table_name}'. Fields do not match exactly. Skipping layer.")
+                table_columns = get_table_columns(sde_connection, table_name)
+                fields_match, layer_exclusive, table_exclusive = compare_layer_fields_with_table(
+                    layer_info['fields'], 
+                    table_columns,
+                    fgdb_name,
+                    source_directory
+                )
+                
+                if not fields_match:
+                    logger.warning(f"Schema mismatch for table '{table_name}'. Skipping layer.")
                     continue
                 
-                logger.info(f"Table '{table_name}' exists with matching schema. Ready for data import.")
-                # TODO: Implement data import logic here
+                logger.info(f"Table '{table_name}' exists with matching schema. Importing data...")
+                
+                # Import data
+                success = import_features_to_table(
+                    sde_connection=sde_connection,
+                    source_gdb_path=gdb_path,
+                    source_layer_name=layer_name,
+                    target_table_name=table_name,
+                    source_directory=source_directory,
+                    fgdb_name=fgdb_name,
+                    batch_id=batch_id
+                )
+                
+                if success:
+                    logger.info(f"Successfully imported data to '{table_name}'")
+                else:
+                    logger.error(f"Failed to import data to '{table_name}'")
                 
             else:
                 # Create new table
@@ -116,17 +150,39 @@ def process_gdb(
                 # Get normalized geometry type
                 geom_type = normalize_geometry_type(layer_info['geometry_type'])
                 
+                # Get spatial reference from layer
+                import arcpy
+                arcpy.env.workspace = gdb_path
+                desc = arcpy.Describe(layer_name)
+                spatial_ref = desc.spatialReference if hasattr(desc, 'spatialReference') else None
+                
                 # Create table
                 success = create_table_from_gdb_fields(
-                    conn,
-                    table_name,
-                    layer_info['fields'],
-                    geom_type
+                    sde_connection=sde_connection,
+                    table_name=table_name,
+                    gdb_fields=layer_info['fields'],
+                    geometry_type=geom_type,
+                    spatial_reference=spatial_ref
                 )
                 
                 if success:
-                    logger.info(f"Successfully created table '{table_name}'. Ready for data import.")
-                    # TODO: Implement data import logic here
+                    logger.info(f"Successfully created table '{table_name}'. Importing data...")
+                    
+                    # Import data
+                    import_success = import_features_to_table(
+                        sde_connection=sde_connection,
+                        source_gdb_path=gdb_path,
+                        source_layer_name=layer_name,
+                        target_table_name=table_name,
+                        source_directory=source_directory,
+                        fgdb_name=fgdb_name,
+                        batch_id=batch_id
+                    )
+                    
+                    if import_success:
+                        logger.info(f"Successfully imported data to '{table_name}'")
+                    else:
+                        logger.error(f"Failed to import data to '{table_name}'")
                 else:
                     logger.error(f"Failed to create table '{table_name}'")
                     continue
@@ -136,18 +192,15 @@ def process_gdb(
     except Exception as e:
         logger.error(f"Error processing GDB '{gdb_path}': {e}")
         return False
-        
-    finally:
-        datasource = None  # Close datasource
 
 
-def process_folder(folder_path: str, conn, batch_id: int) -> bool:
+def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool:
     """
     Process a single folder (looking for GIS resources)
     
     Args:
         folder_path: Path to folder
-        conn: Database connection
+        sde_connection: SDE connection path
         batch_id: Batch ID for this ingestion run
         
     Returns:
@@ -186,7 +239,7 @@ def process_folder(folder_path: str, conn, batch_id: int) -> bool:
     # Process GDB if found
     if gdb_path:
         logger.info(f"Found GDB: {gdb_path}")
-        return process_gdb(gdb_path, source_directory, conn, batch_id)
+        return process_gdb(gdb_path, source_directory, sde_connection, batch_id)
     else:
         logger.info(f"No GDB found in folder: {folder_path}")
         return False
@@ -206,18 +259,18 @@ def main():
         logger.error("Please update ROOT_PATH in config.py")
         return
     
-    # Connect to database
+    # Connect to database via SDE
     try:
-        conn = connect_to_gis(POSTGRES_CONFIG)
-        logger.info("Successfully connected to PostgreSQL database")
+        sde_conn = connect_to_gis(SDE_CONNECTION)
+        logger.info("Successfully connected to Enterprise Geodatabase")
     except Exception as e:
         logger.error(f"Failed to connect to database: {e}")
-        logger.error("Please update database credentials in config.py")
+        logger.error("Please update SDE_CONNECTION path in config.py")
         return
     
     try:
         # Get next batch ID
-        batch_id = get_next_batch_id(conn)
+        batch_id = get_next_batch_id(sde_conn)
         logger.info(f"Using batch ID: {batch_id}")
         
         # Scan root directory for matching folders
@@ -231,7 +284,7 @@ def main():
         success_count = 0
         for folder_path in matching_folders:
             try:
-                if process_folder(folder_path, conn, batch_id):
+                if process_folder(folder_path, sde_conn, batch_id):
                     success_count += 1
             except Exception as e:
                 logger.error(f"Error processing folder '{folder_path}': {e}")
@@ -245,10 +298,8 @@ def main():
         logger.error(f"Unexpected error: {e}")
         
     finally:
-        # Close database connection
-        if conn:
-            conn.close()
-            logger.info("Database connection closed")
+        # SDE connections don't need explicit closing
+        logger.info("Process complete")
 
 
 if __name__ == "__main__":
