@@ -37,6 +37,10 @@ from gdb_handler import (
 # Initialize logger
 logger = setup_logger()
 
+# Global data structure to collect all layer schemas
+# Format: {(gdb_name, layer_name, geom_type): set(column_names)}
+LAYER_SCHEMAS = {}
+
 
 def process_gdb(
     gdb_path: str,
@@ -60,6 +64,12 @@ def process_gdb(
     
     # Extract FGDB name
     fgdb_name = os.path.basename(gdb_path)
+    
+    # Extract source directory name (the A-xxxx folder name)
+    source_dir_name = os.path.basename(source_directory)
+    
+    # Extract GDB name without .gdb extension
+    gdb_name_without_ext = os.path.splitext(fgdb_name)[0]
     
     # Open/validate the GDB
     validated_gdb = open_fgdb(gdb_path)
@@ -85,8 +95,21 @@ def process_gdb(
                 logger.error(f"Failed to get layer info: {layer_name}")
                 continue
             
-            # Normalize table name (lowercase, replace spaces with underscores)
-            table_name = layer_name.lower().replace(' ', '_').replace('-', '_')
+            # Collect schema information for analysis
+            geom_type = normalize_geometry_type(layer_info['geometry_type']) or 'table'
+            column_names = set(
+                field['name'].lower() for field in layer_info['fields']
+                if field['name'].lower() not in ['objectid', 'oid', 'shape', 'geometry', 'shape_length', 'shape_area']
+            )
+            schema_key = (fgdb_name, layer_name, geom_type)
+            LAYER_SCHEMAS[schema_key] = column_names
+            
+            # Create table name: <source_dir>_<gdb_name>_<layer_name>
+            # Normalize each part (lowercase, replace special chars with underscores)
+            source_part = source_dir_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
+            gdb_part = gdb_name_without_ext.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
+            layer_part = layer_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
+            table_name = f"{source_part}_{gdb_part}_{layer_part}"
             
             # Check if table exists
             if table_exists(sde_connection, table_name):
@@ -228,13 +251,16 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
     if compressed_files:
         logger.info(f"Found {len(compressed_files)} compressed file(s)")
         for archive_path in compressed_files:
-            extract_archive(archive_path)
+            success = extract_archive(archive_path)
             
-            # After extraction, search again for GDB
-            extract_dir = os.path.dirname(archive_path)
-            _, new_gdb_path, _ = find_gis_resources(extract_dir)
-            if new_gdb_path:
-                gdb_path = new_gdb_path
+            # After successful extraction, search again for GDB
+            if success:
+                extract_dir = os.path.dirname(archive_path)
+                _, new_gdb_path, _ = find_gis_resources(extract_dir)
+                if new_gdb_path:
+                    gdb_path = new_gdb_path
+            else:
+                logger.warning(f"Skipping archive '{archive_path}' - extraction failed. Continuing with other files.")
     
     # Process GDB if found
     if gdb_path:
@@ -243,6 +269,65 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
     else:
         logger.info(f"No GDB found in folder: {folder_path}")
         return False
+
+
+def analyze_and_print_schemas():
+    """
+    Analyze collected layer schemas and print summary of column differences
+    """
+    if not LAYER_SCHEMAS:
+        logger.info("No schemas collected for analysis")
+        return
+    
+    # Get all unique columns across all layers
+    all_columns = set()
+    for columns in LAYER_SCHEMAS.values():
+        all_columns.update(columns)
+    
+    if not all_columns:
+        logger.info("No columns found in any layer")
+        return
+    
+    # Group layers by their column sets
+    # Format: {frozenset(columns): [(gdb_name, layer_name, geom_type), ...]}
+    column_groups = {}
+    for (gdb_name, layer_name, geom_type), columns in LAYER_SCHEMAS.items():
+        columns_key = frozenset(columns)
+        if columns_key not in column_groups:
+            column_groups[columns_key] = []
+        column_groups[columns_key].append((gdb_name, layer_name, geom_type))
+    
+    # Sort groups by number of columns (ascending) and then by missing columns count
+    sorted_groups = sorted(
+        column_groups.items(),
+        key=lambda x: (len(x[0]), len(all_columns - x[0]))
+    )
+    
+    # Print schema analysis
+    logger.info("=" * 80)
+    logger.info("SCHEMA ANALYSIS - Column Distribution Across Layers")
+    logger.info("=" * 80)
+    logger.info(f"Total unique columns found: {len(all_columns)}")
+    logger.info(f"All columns: {', '.join(sorted(all_columns))}")
+    logger.info("")
+    
+    for columns_set, layer_list in sorted_groups:
+        columns = set(columns_set)
+        missing_columns = all_columns - columns
+        
+        # Format layer names
+        layer_names = []
+        for gdb_name, layer_name, geom_type in sorted(layer_list):
+            layer_names.append(f"{gdb_name}_{layer_name}")
+        
+        # Build the output string
+        layers_str = ", ".join(layer_names)
+        columns_str = f"[{', '.join(sorted(columns))}]" if columns else "[]"
+        missing_str = f"[{', '.join(sorted(missing_columns))}]" if missing_columns else "[]"
+        
+        logger.info(f"{layers_str} columns are: {columns_str} (missing {missing_str})")
+    
+    logger.info("=" * 80)
 
 
 def main():
@@ -294,11 +379,16 @@ def main():
         logger.info(f"Processing complete. Successfully processed {success_count}/{len(matching_folders)} folders")
         logger.info("=" * 80)
         
+        # Analyze and print schema differences
+        logger.info("")
+        analyze_and_print_schemas()
+        
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         
     finally:
         # SDE connections don't need explicit closing
+        logger.info("")
         logger.info("Process complete")
 
 
