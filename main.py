@@ -3,7 +3,6 @@ Main script for GIS data ingestion from FGDB to PostgreSQL
 """
 
 import os
-import sys
 from typing import Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,15 +15,8 @@ import arcpy
 from config import SDE_CONNECTION, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME
 from logger_setup import setup_logger
 from database import (
-    connect_to_gis, 
-    table_exists, 
-    get_table_columns,
-    get_table_geometry_type,
-    check_data_already_imported,
-    create_table_from_gdb_fields,
+    connect_to_gis,
     get_next_batch_id,
-    import_features_to_table,
-    # New versioned functions
     normalize_geom_type_for_table,
     get_column_set_from_fields,
     get_or_create_version,
@@ -32,20 +24,15 @@ from database import (
     create_versioned_table_from_gdb_fields,
     import_features_to_versioned_table,
     update_Center_Excavations_header,
-    debug_table_existence
+    initialize_ingestion_id_from_db
 )
 from file_scanner import (
     scan_root_directory,
     find_gis_resources,
     extract_archive,
     get_source_directory_name,
-    get_extracted_gdb_path,
     get_extraction_user,
-    cleanup_extracted_files_dir,
-    find_all_gdbs_in_extracted_dir,
     get_extracted_files_dir,
-    check_if_directory_already_processed,
-    copy_gdb_files_only,
     get_gis_resources_size_gb,
     organize_gdbs_in_source_directory,
     find_all_gdbs_recursively
@@ -54,16 +41,36 @@ from gdb_handler import (
     open_fgdb,
     get_gdb_layers,
     get_layer_info,
-    normalize_geometry_type,
-    compare_layer_fields_with_table
+    normalize_geometry_type
 )
 
 # Initialize logger
 logger = setup_logger()
 
-# Global data structure to collect all layer schemas
-# Format: {(gdb_name, layer_name, geom_type): set(column_names)}
-LAYER_SCHEMAS = {}
+
+def clean_extracted_files():
+    """Clean extracted_files directories - keep only .gdb directories"""
+    extracted_files_dir = get_extracted_files_dir()
+    
+    for source_dir in os.listdir(extracted_files_dir):
+        source_path = os.path.join(extracted_files_dir, source_dir)
+        
+        if not os.path.isdir(source_path):
+            continue
+        
+        for item in os.listdir(source_path):
+            item_path = os.path.join(source_path, item)
+            
+            if os.path.isdir(item_path) and (item.lower().endswith('.gdb') or item.lower().endswith('.gitkeep')):
+                continue
+            
+            try:
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                else:
+                    os.remove(item_path)
+            except:
+                pass
 
 
 def process_gdb(
@@ -144,11 +151,7 @@ def process_gdb(
             
             logger.info(f"Layer '{layer_name}' -> Table '{table_name}' (ingestion_id: {ingestion_id})")
             
-            # Always try to create new table (will handle "already exists" error)
-            logger.info(f"Creating or using existing table: {table_name}")
-            
             # Get spatial reference from layer
-            import arcpy
             arcpy.env.workspace = gdb_path
             desc = arcpy.Describe(layer_name)
             spatial_ref = desc.spatialReference if hasattr(desc, 'spatialReference') else None
@@ -205,8 +208,6 @@ def process_gdb(
         
     except Exception as e:
         logger.error(f"Error processing GDB '{gdb_path}': {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return False
 
 
@@ -240,11 +241,8 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
         if compressed_files_in_gis:
             compressed_files = compressed_files_in_gis
     
-    # Check if this directory has already been processed
+    # Determine which folder to copy GDBs from
     check_folder = gis_folder if gis_folder else folder_path
-    if check_if_directory_already_processed(check_folder):
-        logger.info(f"Directory already processed, skipping: {check_folder}")
-        return True
     
     # If we have GIS resources (GDB or compressed files), process them
     if gis_folder or gdb_path or compressed_files:
@@ -288,7 +286,7 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
                 # Extract to source-specific subdirectory
                 extract_archive(archive_path, source_directory_name=source_dir_basename)
             
-            # Organize extracted GDBs: find them recursively, copy to root, delete non-GDB files
+            # Organize extracted GDBs: find them recursively, copy to root
             logger.info("Organizing extracted GDB files...")
             organize_gdbs_in_source_directory(source_dir_basename)
         
@@ -315,74 +313,11 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
             else:
                 logger.error(f"Failed to process GDB: {gdb_path}")
         
-        # Final cleanup after processing all GDBs from this folder
-        logger.info("Final cleanup of extraction directory...")
-        cleanup_extracted_files_dir()
-        
         return success_count > 0
     
     else:
         logger.info(f"No GIS resources found in folder: {folder_path}")
         return False
-
-
-def analyze_and_print_schemas():
-    """
-    Analyze collected layer schemas and print summary of column differences
-    """
-    if not LAYER_SCHEMAS:
-        logger.info("No schemas collected for analysis")
-        return
-    
-    # Get all unique columns across all layers
-    all_columns = set()
-    for columns in LAYER_SCHEMAS.values():
-        all_columns.update(columns)
-    
-    if not all_columns:
-        logger.info("No columns found in any layer")
-        return
-    
-    # Group layers by their column sets
-    # Format: {frozenset(columns): [(gdb_name, layer_name, geom_type), ...]}
-    column_groups = {}
-    for (gdb_name, layer_name, geom_type), columns in LAYER_SCHEMAS.items():
-        columns_key = frozenset(columns)
-        if columns_key not in column_groups:
-            column_groups[columns_key] = []
-        column_groups[columns_key].append((gdb_name, layer_name, geom_type))
-    
-    # Sort groups by number of columns (ascending) and then by missing columns count
-    sorted_groups = sorted(
-        column_groups.items(),
-        key=lambda x: (len(x[0]), len(all_columns - x[0]))
-    )
-    
-    # Print schema analysis
-    logger.info("=" * 80)
-    logger.info("SCHEMA ANALYSIS - Column Distribution Across Layers")
-    logger.info("=" * 80)
-    logger.info(f"Total unique columns found: {len(all_columns)}")
-    logger.info(f"All columns: {', '.join(sorted(all_columns))}")
-    logger.info("")
-    
-    for columns_set, layer_list in sorted_groups:
-        columns = set(columns_set)
-        missing_columns = all_columns - columns
-        
-        # Format layer names
-        layer_names = []
-        for gdb_name, layer_name, geom_type in sorted(layer_list):
-            layer_names.append(f"{gdb_name}_{layer_name}")
-        
-        # Build the output string
-        layers_str = ", ".join(layer_names)
-        columns_str = f"[{', '.join(sorted(columns))}]" if columns else "[]"
-        missing_str = f"[{', '.join(sorted(missing_columns))}]" if missing_columns else "[]"
-        
-        logger.info(f"{layers_str} columns are: {columns_str} (missing {missing_str})")
-    
-    logger.info("=" * 80)
 
 
 def main():
@@ -409,6 +344,9 @@ def main():
         return
     
     try:
+        # Initialize ingestion ID from database (to avoid duplicates on restart)
+        initialize_ingestion_id_from_db(sde_conn)
+        
         # Get next batch ID
         batch_id = get_next_batch_id(sde_conn)
         logger.info(f"Using batch ID: {batch_id}")
@@ -420,8 +358,52 @@ def main():
             logger.warning(f"No folders found starting with '{FOLDER_PREFIX}' in {ROOT_PATH}")
             return
         
-        # Filter folders by GIS resources size (keep only those 60GB or under) - using parallel threads
-        logger.info(f"Checking GIS resources size (compressed files + .gdb) for {len(matching_folders)} source directories in parallel...")
+        # Filter out directories already in extracted_files/
+        extract_dir = get_extracted_files_dir()
+        if os.path.exists(extract_dir):
+            already_extracted = set()
+            for item in os.listdir(extract_dir):
+                if os.path.isdir(os.path.join(extract_dir, item)):
+                    already_extracted.add(item)
+            
+            original_count = len(matching_folders)
+            matching_folders = [f for f in matching_folders if os.path.basename(f) not in already_extracted]
+            skipped_count = original_count - len(matching_folders)
+            
+            if skipped_count > 0:
+                logger.info(f"Skipped {skipped_count} directories already extracted (found in extracted_files/)")
+        
+        if not matching_folders:
+            logger.warning(f"No folders to process after filtering already extracted directories")
+            return
+        
+        # Filter out directories listed in huge_dirs.txt
+        huge_dirs_file = "huge_dirs.txt"
+        if os.path.exists(huge_dirs_file):
+            try:
+                with open(huge_dirs_file, 'r', encoding='utf-8') as f:
+                    huge_dirs = set()
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            # Extract just the directory name (not full path)
+                            huge_dirs.add(os.path.basename(line))
+                
+                original_count = len(matching_folders)
+                matching_folders = [f for f in matching_folders if os.path.basename(f) not in huge_dirs]
+                skipped_count = original_count - len(matching_folders)
+                
+                if skipped_count > 0:
+                    logger.info(f"Skipped {skipped_count} directories listed in {huge_dirs_file}")
+            except Exception as e:
+                logger.warning(f"Could not read {huge_dirs_file}: {e}")
+        
+        if not matching_folders:
+            logger.warning(f"No folders to process after filtering huge directories")
+            return
+        
+        # Filter folders by GIS resources size (keep only those 20GB or under) - using parallel threads
+        logger.info(f"Checking GIS resources size (compressed files + .gdb files at first level) for {len(matching_folders)} source directories in parallel...")
         folders_to_process = []
         skipped_folders = []
         
@@ -429,9 +411,9 @@ def main():
         max_workers = min(10, len(matching_folders))  # Use up to 10 threads
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all size calculation tasks with 60GB threshold for early exit
+            # Submit all size calculation tasks with 20GB threshold for early exit
             future_to_folder = {
-                executor.submit(get_gis_resources_size_gb, folder_path, 60): folder_path 
+                executor.submit(get_gis_resources_size_gb, folder_path, 20): folder_path 
                 for folder_path in matching_folders
             }
             
@@ -440,12 +422,10 @@ def main():
                 folder_path = future_to_folder[future]
                 try:
                     folder_size_gb = future.result()
-                    if folder_size_gb <= 60:
+                    if folder_size_gb <= 20:
                         folders_to_process.append(folder_path)
-                        logger.debug(f"{folder_path}: {folder_size_gb:.2f} GB - will process")
                     else:
                         skipped_folders.append((folder_path, folder_size_gb))
-                        logger.debug(f"{folder_path}: {folder_size_gb:.2f} GB - skipping (over 60GB)")
                 except Exception as e:
                     logger.error(f"Error calculating size for {folder_path}: {e}")
                     # Skip this folder if we can't calculate its size
@@ -453,12 +433,11 @@ def main():
         
         # Log summary
         logger.info("=" * 80)
-        logger.info(f"{len(matching_folders)} source directories with '{FOLDER_PREFIX}' prefix were found")
-        logger.info(f"{len(folders_to_process)} from this list are 60GB or under (GIS resources) and will be processed")
+        logger.info(f"{len(folders_to_process)} from {len(matching_folders)} source directories will be processed (20GB or under)")
         if skipped_folders:
-            logger.info(f"{len(skipped_folders)} directories skipped due to GIS resources size > 60GB:")
+            logger.info(f"{len(skipped_folders)} directories skipped due to size > 20GB:")
             for skipped_path, size_gb in skipped_folders:
-                logger.info(f"  - {os.path.basename(skipped_path)}: {size_gb:.2f} GB (compressed files + .gdb)")
+                logger.info(f"  - {os.path.basename(skipped_path)}: {size_gb:.2f} GB")
         logger.info("=" * 80)
         
         if not folders_to_process:
@@ -467,25 +446,24 @@ def main():
         
         # Process each folder
         success_count = 0
-        for folder_path in folders_to_process:
+        for idx, folder_path in enumerate(folders_to_process, 1):
             try:
                 if process_folder(folder_path, sde_conn, batch_id):
                     success_count += 1
             except Exception as e:
                 logger.error(f"Error processing folder '{folder_path}': {e}")
                 continue
+            
+            # Clean up every 5 directories
+            if idx % 5 == 0:
+                clean_extracted_files()
         
-        # Final cleanup of extraction directory (in case any files remain)
-        logger.info("Final cleanup of extraction directory...")
-        cleanup_extracted_files_dir()
+        # Final cleanup
+        clean_extracted_files()
         
         logger.info("=" * 80)
-        logger.info(f"Processing complete. Successfully processed {success_count}/{len(matching_folders)} folders")
+        logger.info(f"Processing complete. Successfully processed {success_count}/{len(folders_to_process)} folders")
         logger.info("=" * 80)
-        
-        # Analyze and print schema differences
-        logger.info("")
-        analyze_and_print_schemas()
         
     except Exception as e:
         logger.error(f"Unexpected error: {e}")

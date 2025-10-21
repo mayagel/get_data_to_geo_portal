@@ -6,7 +6,6 @@ import arcpy
 from typing import List, Dict, Optional, Tuple, Set
 from datetime import datetime
 import logging
-import json
 
 logger = logging.getLogger("GISIngestion.database")
 
@@ -15,6 +14,62 @@ VERSION_TRACKER = {}  # {(geom_type, frozenset(columns)): version_id}
 NEXT_VERSION_IDS = {'poly': 'A', 'line': 'A', 'point': 'A'}  # Track next version letter per geometry type
 CURRENT_INGESTION_ID = 1  # Global ingestion ID counter
 GDB_INGESTION_IDS = {}  # {gdb_path: ingestion_id} to track same ID for layers from same GDB
+
+
+def _increment_version(current_version: str) -> str:
+    """
+    Increment version string: A->B->...->Z->AA->AB->...->AZ
+    
+    Args:
+        current_version: Current version letter(s)
+        
+    Returns:
+        Next version letter(s)
+    """
+    if len(current_version) == 1:
+        # Single letter: A-Z
+        if current_version == 'Z':
+            return 'AA'
+        else:
+            return chr(ord(current_version) + 1)
+    elif len(current_version) == 2:
+        # Double letter: AA-AZ
+        if current_version[1] == 'Z':
+            # Reached AZ, can't go further
+            logger.warning(f"Reached maximum version AZ for geometry type!")
+            return 'AZ'
+        else:
+            return current_version[0] + chr(ord(current_version[1]) + 1)
+    else:
+        # Should not happen
+        return current_version
+
+
+def _compare_versions(version1: str, version2: str) -> int:
+    """
+    Compare two version strings
+    
+    Args:
+        version1: First version (e.g., 'A', 'Z', 'AA')
+        version2: Second version
+        
+    Returns:
+        -1 if version1 < version2, 0 if equal, 1 if version1 > version2
+    """
+    # Single letter versions come before double letter
+    if len(version1) == 1 and len(version2) == 2:
+        return -1
+    elif len(version1) == 2 and len(version2) == 1:
+        return 1
+    elif len(version1) == len(version2):
+        if version1 < version2:
+            return -1
+        elif version1 > version2:
+            return 1
+        else:
+            return 0
+    else:
+        return 0
 
 
 def connect_to_gis(sde_connection_path: str) -> Optional[str]:
@@ -33,7 +88,6 @@ def connect_to_gis(sde_connection_path: str) -> Optional[str]:
     try:
         # Test the connection by describing the workspace
         desc = arcpy.Describe(sde_connection_path)
-        logger.debug(f"Connected to {desc.workspaceType} workspace: {desc.connectionString}")
         logger.info(f"Successfully connected to enterprise geodatabase via SDE")
         return sde_connection_path
     except Exception as e:
@@ -100,8 +154,6 @@ def write_version_to_file(version_id: str, geom_type: str, source_directory: str
         
         with open(version_file, 'a', encoding='utf-8') as f:
             f.write(f"{geom_type}_{version_id}: {source_directory}, {gdb_filename}, [{columns_str}]\n")
-        
-        logger.debug(f"Wrote version info to {version_file}")
     except Exception as e:
         logger.warning(f"Could not write to layers_version.txt: {e}")
 
@@ -147,8 +199,8 @@ def get_or_create_version(
     version_id = f'ver{next_letter}'
     VERSION_TRACKER[key] = version_id
     
-    # Increment version letter
-    NEXT_VERSION_IDS[geom_type_norm] = chr(ord(next_letter) + 1)
+    # Increment version letter (A->B->...->Z->AA->AB->...->AZ)
+    NEXT_VERSION_IDS[geom_type_norm] = _increment_version(next_letter)
     
     # Get info for logging
     columns_list = sorted(column_set)
@@ -210,15 +262,55 @@ def load_existing_versions_from_db(sde_connection: str) -> None:
                 
                 # Update next version letter if needed
                 version_letter = version.replace('ver', '')
-                if version_letter >= NEXT_VERSION_IDS[geom_type]:
-                    NEXT_VERSION_IDS[geom_type] = chr(ord(version_letter) + 1)
-                
-                logger.debug(f"Loaded existing version {version} for {geom_type}")
+                if _compare_versions(version_letter, NEXT_VERSION_IDS[geom_type]) >= 0:
+                    NEXT_VERSION_IDS[geom_type] = _increment_version(version_letter)
         
         logger.info(f"Loaded {len(VERSION_TRACKER)} existing versions from database")
         
     except Exception as e:
         logger.warning(f"Could not load existing versions from database: {e}")
+
+
+def initialize_ingestion_id_from_db(sde_connection: str) -> None:
+    """
+    Initialize the global ingestion ID counter from the database
+    Gets the maximum ingestion_id from Center_Excavations_header and continues from there
+    
+    Args:
+        sde_connection: SDE connection path
+    """
+    global CURRENT_INGESTION_ID
+    
+    try:
+        # Ensure the table exists first
+        if not ensure_Center_Excavations_header_table(sde_connection):
+            logger.warning("Could not ensure Center_Excavations_header table exists, starting from ID 1")
+            return
+        
+        arcpy.env.workspace = sde_connection
+        table_name = "Center_Excavations_header"
+        table_path = f"{sde_connection}\\{table_name}"
+        
+        # Get maximum ingestion_id from the table
+        max_ingestion_id = 0
+        try:
+            with arcpy.da.SearchCursor(table_path, ["ingestion_id"]) as cursor:
+                for row in cursor:
+                    if row[0] and row[0] > max_ingestion_id:
+                        max_ingestion_id = row[0]
+        except Exception as e:
+            logger.warning(f"Could not query ingestion_id from database: {e}")
+        
+        # Set current ingestion ID to continue from the maximum
+        if max_ingestion_id > 0:
+            CURRENT_INGESTION_ID = max_ingestion_id + 1
+            logger.info(f"Continuing from ingestion_id: {CURRENT_INGESTION_ID} (max in DB: {max_ingestion_id})")
+        else:
+            logger.info(f"No existing ingestion_ids found, starting from: {CURRENT_INGESTION_ID}")
+        
+    except Exception as e:
+        logger.warning(f"Error initializing ingestion ID from database: {e}")
+        logger.info(f"Starting from default ingestion_id: {CURRENT_INGESTION_ID}")
 
 
 def get_ingestion_id_for_gdb(gdb_path: str) -> int:
@@ -242,237 +334,9 @@ def get_ingestion_id_for_gdb(gdb_path: str) -> int:
     GDB_INGESTION_IDS[gdb_path] = ingestion_id
     CURRENT_INGESTION_ID += 1
     
-    logger.debug(f"Assigned ingestion ID {ingestion_id} to GDB: {gdb_path}")
-    
     return ingestion_id
 
 
-def force_delete_table(sde_connection: str, table_name: str) -> bool:
-    """
-    Force delete a table that might be stuck in SDE metadata
-    
-    Args:
-        sde_connection: SDE connection path
-        table_name: Name of the table to delete
-        
-    Returns:
-        True if deletion successful or table doesn't exist
-    """
-    try:
-        arcpy.env.workspace = sde_connection
-        table_path = f"{sde_connection}\\{table_name}"
-        
-        # Try to delete if it exists
-        if arcpy.Exists(table_path):
-            logger.info(f"Attempting to force delete table: {table_name}")
-            try:
-                arcpy.Delete_management(table_path)
-                logger.info(f"Successfully deleted table: {table_name}")
-            except Exception as e:
-                logger.warning(f"Could not delete table (might not actually exist): {e}")
-        
-        # Clear all caches
-        arcpy.ClearWorkspaceCache_management()
-        arcpy.RefreshCatalog(sde_connection)
-        
-        # Verify it's gone
-        if arcpy.Exists(table_path):
-            logger.warning(f"Table still appears to exist after deletion: {table_name}")
-            return False
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error during force delete: {e}")
-        return False
-
-
-def table_exists(sde_connection: str, table_name: str) -> bool:
-    """
-    Check if a table/feature class exists in the database
-    
-    Args:
-        sde_connection: SDE connection path
-        table_name: Name of the table to check
-        
-    Returns:
-        True if table exists, False otherwise
-    """
-    try:
-        arcpy.env.workspace = sde_connection
-        
-        # Clear cache to get fresh data
-        arcpy.ClearWorkspaceCache_management()
-        
-        # Check using arcpy.Exists (most reliable)
-        table_path = f"{sde_connection}\\{table_name}"
-        exists = arcpy.Exists(table_path)
-        
-        if exists:
-            logger.debug(f"Table/Feature class '{table_name}' exists")
-        else:
-            logger.debug(f"Table/Feature class '{table_name}' does not exist")
-            
-        return exists
-        
-    except Exception as e:
-        logger.error(f"Error checking if table exists: {e}")
-        return False
-
-
-def debug_table_existence(sde_connection: str, table_name: str) -> None:
-    """
-    Debug function to check table existence using multiple methods
-    
-    Args:
-        sde_connection: SDE connection path
-        table_name: Name of the table to check
-    """
-    try:
-        arcpy.env.workspace = sde_connection
-        arcpy.ClearWorkspaceCache_management()
-        
-        table_path = f"{sde_connection}\\{table_name}"
-        
-        logger.info(f"=== DEBUG: Checking table existence for '{table_name}' ===")
-        
-        # Method 1: arcpy.Exists
-        exists1 = arcpy.Exists(table_path)
-        logger.info(f"arcpy.Exists: {exists1}")
-        
-        # Method 2: ListFeatureClasses
-        try:
-            fcs = arcpy.ListFeatureClasses(table_name)
-            exists2 = fcs and table_name in [fc.lower() for fc in fcs]
-            logger.info(f"ListFeatureClasses: {exists2} (found: {fcs})")
-        except Exception as e:
-            logger.info(f"ListFeatureClasses error: {e}")
-        
-        # Method 3: ListTables
-        try:
-            tables = arcpy.ListTables(table_name)
-            exists3 = tables and table_name in [tbl.lower() for tbl in tables]
-            logger.info(f"ListTables: {exists3} (found: {tables})")
-        except Exception as e:
-            logger.info(f"ListTables error: {e}")
-        
-        # Method 4: List all tables
-        try:
-            all_fcs = arcpy.ListFeatureClasses()
-            all_tables = arcpy.ListTables()
-            all_items = (all_fcs or []) + (all_tables or [])
-            matching_items = [item for item in all_items if item.lower() == table_name.lower()]
-            logger.info(f"All tables/FCs containing '{table_name}': {matching_items}")
-        except Exception as e:
-            logger.info(f"List all items error: {e}")
-        
-        logger.info("=== END DEBUG ===")
-        
-    except Exception as e:
-        logger.error(f"Debug function error: {e}")
-
-
-def get_table_columns(sde_connection: str, table_name: str) -> List[Tuple[str, str]]:
-    """
-    Get column names and types from a table
-    
-    Args:
-        sde_connection: SDE connection path
-        table_name: Name of the table
-        
-    Returns:
-        List of tuples (column_name, data_type)
-    """
-    try:
-        arcpy.env.workspace = sde_connection
-        
-        # Get full path to the table
-        table_path = f"{sde_connection}\\{table_name}"
-        
-        fields = arcpy.ListFields(table_path)
-        columns = []
-        
-        for field in fields:
-            columns.append((field.name.lower(), field.type))
-        
-        logger.debug(f"Table '{table_name}' has {len(columns)} columns")
-        return columns
-        
-    except Exception as e:
-        logger.error(f"Error getting table columns: {e}")
-        return []
-
-
-def get_table_geometry_type(sde_connection: str, table_name: str) -> Optional[str]:
-    """
-    Get the geometry type from a feature class
-    
-    Args:
-        sde_connection: SDE connection path
-        table_name: Name of the table
-        
-    Returns:
-        Geometry type (e.g., 'POINT', 'POLYLINE', 'POLYGON') or None if no geometry column
-    """
-    try:
-        arcpy.env.workspace = sde_connection
-        table_path = f"{sde_connection}\\{table_name}"
-        
-        desc = arcpy.Describe(table_path)
-        
-        if hasattr(desc, 'shapeType'):
-            geom_type = desc.shapeType.upper()
-            logger.debug(f"Table '{table_name}' has geometry type: {geom_type}")
-            return geom_type
-        else:
-            logger.debug(f"Table '{table_name}' has no geometry column")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error getting table geometry type: {e}")
-        return None
-
-
-def check_data_already_imported(
-    sde_connection: str,
-    table_name: str,
-    source_directory: str,
-    fgdb_name: str
-) -> bool:
-    """
-    Check if data from this source has already been imported
-    
-    Args:
-        sde_connection: SDE connection path
-        table_name: Name of the table
-        source_directory: Source directory path
-        fgdb_name: Name of the FGDB
-        
-    Returns:
-        True if data already exists, False otherwise
-    """
-    try:
-        arcpy.env.workspace = sde_connection
-        table_path = f"{sde_connection}\\{table_name}"
-        
-        # Build where clause to check for existing data
-        where_clause = f"source_directory = '{source_directory}' AND fgdb_name = '{fgdb_name}'"
-        
-        # Count matching records
-        count = 0
-        with arcpy.da.SearchCursor(table_path, ["OBJECTID"], where_clause=where_clause) as cursor:
-            for row in cursor:
-                count += 1
-        
-        if count > 0:
-            logger.info(f"Data from '{source_directory}' / '{fgdb_name}' already imported ({count} records)")
-            return True
-        return False
-        
-    except Exception as e:
-        logger.error(f"Error checking if data already imported: {e}")
-        # If columns don't exist, data hasn't been imported with this structure
-        return False
 
 
 def create_versioned_table_from_gdb_fields(
@@ -571,7 +435,6 @@ def create_versioned_table_from_gdb_fields(
                     field_type=field_type,
                     field_length=field_length
                 )
-                logger.debug(f"Added field: {field_name} ({field_type})")
             except Exception as e:
                 logger.warning(f"Could not add field '{field_name}': {e}")
         
@@ -586,86 +449,6 @@ def create_versioned_table_from_gdb_fields(
         return False
 
 
-def create_table_from_gdb_fields(
-    sde_connection: str,
-    table_name: str,
-    gdb_fields: List[Dict],
-    geometry_type: Optional[str] = None,
-    spatial_reference: Optional[arcpy.SpatialReference] = None
-) -> bool:
-    """
-    DEPRECATED: Use create_versioned_table_from_gdb_fields instead
-    Create a new feature class/table based on GDB fields with additional metadata fields
-    
-    Args:
-        sde_connection: SDE connection path
-        table_name: Name of the table to create
-        gdb_fields: List of field definitions from GDB
-        geometry_type: Geometry type (Point, Polyline, Polygon, etc.)
-        spatial_reference: Spatial reference object
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        arcpy.env.workspace = sde_connection
-        
-        # Default spatial reference if not provided (Israel TM Grid - EPSG:2039)
-        if spatial_reference is None:
-            spatial_reference = arcpy.SpatialReference(2039)
-        
-        # Create feature class or table
-        if geometry_type:
-            # Create feature class
-            output_fc = arcpy.CreateFeatureclass_management(
-                out_path=sde_connection,
-                out_name=table_name,
-                geometry_type=geometry_type,
-                spatial_reference=spatial_reference
-            )[0]
-            logger.info(f"Created feature class: {table_name}")
-        else:
-            # Create table (no geometry)
-            output_fc = arcpy.CreateTable_management(
-                out_path=sde_connection,
-                out_name=table_name
-            )[0]
-            logger.info(f"Created table: {table_name}")
-        
-        # Add fields from GDB
-        for field in gdb_fields:
-            field_name = field['name']
-            field_type = map_gdb_type_to_arcpy(field['type'])
-            
-            # Skip system fields
-            if field_name.upper() in ['OBJECTID', 'OID', 'SHAPE', 'GEOMETRY', 'FID', 'SHAPE_LENGTH', 'SHAPE_AREA']:
-                continue
-            
-            # Add the field
-            try:
-                field_length = field.get('width', 255) if field_type == 'TEXT' else None
-                arcpy.AddField_management(
-                    in_table=output_fc,
-                    field_name=field_name,
-                    field_type=field_type,
-                    field_length=field_length
-                )
-                logger.debug(f"Added field: {field_name} ({field_type})")
-            except Exception as e:
-                logger.warning(f"Could not add field '{field_name}': {e}")
-        
-        # Add metadata fields
-        arcpy.AddField_management(output_fc, "source_directory", "TEXT", field_length=400)
-        arcpy.AddField_management(output_fc, "ingestion_datetime", "DATE")
-        arcpy.AddField_management(output_fc, "ingestion_batch_id", "LONG")
-        arcpy.AddField_management(output_fc, "fgdb_name", "TEXT", field_length=255)
-        
-        logger.info(f"Successfully created {'feature class' if geometry_type else 'table'} '{table_name}' with metadata fields")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error creating table '{table_name}': {e}")
-        return False
 
 
 def map_gdb_type_to_arcpy(gdb_type: str) -> str:
@@ -733,7 +516,6 @@ def get_next_batch_id(sde_connection: str) -> int:
         with arcpy.da.InsertCursor(batch_table_path, ["batch_id", "created_date"]) as cursor:
             cursor.insertRow([new_batch_id, datetime.now()])
         
-        logger.debug(f"Generated batch ID: {new_batch_id}")
         return new_batch_id
         
     except Exception as e:
@@ -851,101 +633,6 @@ def import_features_to_versioned_table(
         return False, 0
 
 
-def import_features_to_table(
-    sde_connection: str,
-    source_gdb_path: str,
-    source_layer_name: str,
-    target_table_name: str,
-    source_directory: str,
-    fgdb_name: str,
-    batch_id: int
-) -> bool:
-    """
-    DEPRECATED: Use import_features_to_versioned_table instead
-    Import features from source GDB layer to target table using ArcPy Editor
-    
-    Args:
-        sde_connection: SDE connection path
-        source_gdb_path: Path to source GDB
-        source_layer_name: Name of source layer
-        target_table_name: Name of target table
-        source_directory: Source directory path
-        fgdb_name: FGDB file name
-        batch_id: Batch ID for this import
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        arcpy.env.workspace = sde_connection
-        target_path = f"{sde_connection}\\{target_table_name}"
-        source_path = f"{source_gdb_path}\\{source_layer_name}"
-        
-        # Get source fields (excluding system fields)
-        source_fields = []
-        for field in arcpy.ListFields(source_path):
-            if field.name.upper() not in ['OBJECTID', 'OID', 'FID', 'SHAPE']:
-                source_fields.append(field.name)
-        
-        # Get target fields
-        target_fields = []
-        for field in arcpy.ListFields(target_path):
-            if field.name.upper() not in ['OBJECTID', 'OID', 'FID']:
-                target_fields.append(field.name)
-        
-        # Find common fields (case-insensitive)
-        source_field_map = {f.upper(): f for f in source_fields}
-        target_field_map = {f.upper(): f for f in target_fields}
-        
-        common_field_keys = set(source_field_map.keys()) & set(target_field_map.keys())
-        
-        # Build field lists for cursors
-        read_fields = [source_field_map[key] for key in common_field_keys]
-        
-        # Add SHAPE if geometry exists
-        desc = arcpy.Describe(source_path)
-        has_geometry = hasattr(desc, 'shapeType')
-        if has_geometry:
-            read_fields.append('SHAPE@')
-        
-        # Prepare write fields (matching order + metadata fields)
-        write_fields = [target_field_map[key] for key in common_field_keys]
-        if has_geometry:
-            write_fields.append('SHAPE@')
-        write_fields.extend(['source_directory', 'ingestion_datetime', 'ingestion_batch_id', 'fgdb_name'])
-        
-        # Start editing session
-        edit = arcpy.da.Editor(sde_connection)
-        edit.startEditing(with_undo=False, multiuser_mode=False)
-        edit.startOperation()
-        
-        try:
-            # Insert features
-            inserted_count = 0
-            with arcpy.da.SearchCursor(source_path, read_fields) as search_cursor:
-                with arcpy.da.InsertCursor(target_path, write_fields) as insert_cursor:
-                    for row in search_cursor:
-                        # Build new row with metadata
-                        new_row = list(row) + [source_directory, datetime.now(), batch_id, fgdb_name]
-                        insert_cursor.insertRow(new_row)
-                        inserted_count += 1
-            
-            # Save edits
-            edit.stopOperation()
-            edit.stopEditing(save_changes=True)
-            
-            logger.info(f"Successfully imported {inserted_count} features from '{source_layer_name}' to '{target_table_name}'")
-            return True
-            
-        except Exception as e:
-            # Abort edits on error
-            edit.stopOperation()
-            edit.stopEditing(save_changes=False)
-            raise e
-            
-    except Exception as e:
-        logger.error(f"Error importing features from '{source_layer_name}' to '{target_table_name}': {e}")
-        return False
 
 
 def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
@@ -967,6 +654,7 @@ def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
     - point_count (number of point features)
     - f_name (GDB file name)
     - s_dir (source directory)
+    - main_folder_name (name of the source directory, e.g., A-8569_Darchmon_20191030)
     - from_compressed (1 if GDB came from compressed file, 0 otherwise)
     
     Args:
@@ -981,7 +669,6 @@ def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
         table_path = f"{sde_connection}\\{table_name}"
         
         if arcpy.Exists(table_path):
-            logger.debug(f"Summary table '{table_name}' already exists")
             return True
         
         # Create the table
@@ -1002,6 +689,7 @@ def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
         arcpy.AddField_management(table_path, "point_count", "LONG")
         arcpy.AddField_management(table_path, "f_name", "TEXT", field_length=255)
         arcpy.AddField_management(table_path, "s_dir", "TEXT", field_length=500)
+        arcpy.AddField_management(table_path, "main_folder_name", "TEXT", field_length=255)
         arcpy.AddField_management(table_path, "from_compressed", "SHORT")
         
         logger.info(f"Successfully created summary table '{table_name}' with all fields")
@@ -1051,6 +739,9 @@ def update_Center_Excavations_header(
         # Extract GDB file name
         gdb_filename = os.path.basename(gdb_path)
         
+        # Extract main folder name from source directory
+        main_folder_name = os.path.basename(source_directory.rstrip('\\').rstrip('/'))
+        
         # Prepare values
         poly_ver = layer_stats.get('poly', {}).get('version', None)
         line_ver = layer_stats.get('line', {}).get('version', None)
@@ -1085,12 +776,12 @@ def update_Center_Excavations_header(
             # Insert new record
             insert_fields = ['creation_date', 'update_date', 'creation_user', 'update_user',
                            'poly_ver', 'line_ver', 'point_ver', 'ingestion_id',
-                           'poly_count', 'line_count', 'point_count', 'f_name', 's_dir', 'from_compressed']
+                           'poly_count', 'line_count', 'point_count', 'f_name', 's_dir', 'main_folder_name', 'from_compressed']
             
             with arcpy.da.InsertCursor(table_path, insert_fields) as cursor:
                 cursor.insertRow([current_time, current_time, creation_user, creation_user,
                                  poly_ver, line_ver, point_ver, ingestion_id,
-                                 poly_count, line_count, point_count, gdb_filename, source_directory, from_compressed_value])
+                                 poly_count, line_count, point_count, gdb_filename, source_directory, main_folder_name, from_compressed_value])
             
             logger.info(f"Inserted new summary record for ingestion_id {ingestion_id}")
         

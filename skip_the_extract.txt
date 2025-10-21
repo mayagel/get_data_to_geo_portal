@@ -1,16 +1,3 @@
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-9732_Kvish_6\dummy.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-9770_Hadasim\A9770 HADASIM GIS.7z
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-6482_20200621\6482.zip
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-7529_Rosh_Haayin_2015\7529.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-7972_Mezad Hashavyahu\A7972.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-7484 A-7647_Horvat_Hamotzav_2022\A7484 A7647 ECW.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-7484 A-7647_Horvat_Hamotzav_2022\A7484 A7647 ortho PDF.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-7972_Mezad Hashavyahu\Ai yakov 15-7-24.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-8003_09112020\A8003 A1 Production_1.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-8044_Bnei Brak\Area B Gil.zip
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-8131_Agam_Michael_20190225\A-8131_AGAM_MIHAEL_20190225.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-8019_Caesarea_20190311\A8019 Byzantine 02 05 2019.rar
-\\iaahq\Archaeological_Documentation\Center\Excavations\A-8019_Caesarea_20190311\A8019 Byzantine 12 09 2019.rar
 \\iaahq\Archaeological_Documentation\Center\Excavations\A-8019_Caesarea_20190311\A8019 Byzantine HIPOCAUS  Piter area (merged block).rar
 \\iaahq\Archaeological_Documentation\Center\Excavations\A-8019_Caesarea_20190311\A8019 BYZANTINE HIPOCAUS.rar
 \\iaahq\Archaeological_Documentation\Center\Excavations\A-8019_Caesarea_20190311\A8019 Byzantine sec west 16 09 2019.rar

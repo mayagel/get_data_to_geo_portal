@@ -25,7 +25,6 @@ def open_fgdb(gdb_path: str) -> Optional[str]:
         if layers is None:
             logger.error(f"No layers found in GDB: {gdb_path}")
             return None
-        logger.debug(f"Successfully opened GDB: {gdb_path}")
         return gdb_path
     except Exception as e:
         logger.error(f"Error opening GDB '{gdb_path}': {e}")
@@ -100,7 +99,6 @@ def get_layer_info(gdb_path: str, layer_name: str) -> Optional[Dict]:
             'feature_count': feature_count
         }
 
-        logger.debug(f"Layer '{desc.name}': {feature_count} features, type: {geom_type}")
         return info
 
     except Exception as e:
@@ -132,53 +130,3 @@ def normalize_geometry_type(geom_type: str) -> Optional[str]:
     return type_mapping.get(geom_type)
 
 
-def compare_layer_fields_with_table(
-    layer_fields: List[Dict], 
-    table_columns: List[tuple],
-    fgdb_name: str,
-    source_directory: str
-) -> Tuple[bool, Set[str], Set[str]]:
-    """
-    Compare layer fields with existing table columns
-
-    Args:
-        layer_fields: List of field definitions from layer
-        table_columns: List of (column_name, data_type) from table
-        fgdb_name: Name of the FGDB file
-        source_directory: Source directory path
-
-    Returns:
-        Tuple of (fields_match, layer_exclusive_fields, table_exclusive_fields)
-    """
-    layer_field_names = set(
-        field['name'].lower() for field in layer_fields
-        if field['name'].lower() not in ['objectid', 'oid', 'shape', 'geometry']
-    )
-
-    metadata_columns = {'id', 'source_directory', 'ingestion_datetime', 'ingestion_batch_id', 'fgdb_name', 'geometry'}
-    table_field_names = set(
-        col[0].lower() for col in table_columns
-        if col[0].lower() not in metadata_columns
-    )
-
-    layer_exclusive = layer_field_names - table_field_names
-    table_exclusive = table_field_names - layer_field_names
-
-    if layer_field_names == table_field_names:
-        logger.debug("Layer fields match table columns")
-        return True, set(), set()
-    else:
-        # Log warnings in the required format
-        if layer_exclusive:
-            exclusive_list = ', '.join(sorted(layer_exclusive))
-            logger.warning(
-                f"{fgdb_name} from {source_directory} have exclusive columns [{exclusive_list}]"
-            )
-        
-        if table_exclusive:
-            exclusive_list = ', '.join(sorted(table_exclusive))
-            logger.warning(
-                f"Table has exclusive columns not in {fgdb_name} from {source_directory}: [{exclusive_list}]"
-            )
-        
-        return False, layer_exclusive, table_exclusive

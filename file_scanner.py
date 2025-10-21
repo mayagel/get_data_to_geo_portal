@@ -27,14 +27,12 @@ SEVEN_ZIP_LOCATIONS = [
 for path in SEVEN_ZIP_LOCATIONS:
     if os.path.exists(path):
         SEVEN_ZIP_PATH = path
-        logger.debug(f"Found 7-Zip: {path}")
         break
 
 if not SEVEN_ZIP_PATH:
     seven_zip_in_path = shutil.which("7z")
     if seven_zip_in_path:
         SEVEN_ZIP_PATH = seven_zip_in_path
-        logger.debug(f"Found 7-Zip in PATH: {seven_zip_in_path}")
 
 # Check for UnRAR
 UNRAR_LOCATIONS = [
@@ -46,7 +44,6 @@ for path in UNRAR_LOCATIONS:
     if os.path.exists(path):
         UNRAR_PATH = path
         rarfile.UNRAR_TOOL = path
-        logger.debug(f"Found UnRAR: {path}")
         break
 
 if not UNRAR_PATH:
@@ -54,14 +51,9 @@ if not UNRAR_PATH:
     if unrar_in_path:
         UNRAR_PATH = unrar_in_path
         rarfile.UNRAR_TOOL = unrar_in_path
-        logger.debug(f"Found UnRAR in PATH: {unrar_in_path}")
 
 # Determine which tool to use for RAR extraction
-if UNRAR_PATH:
-    logger.debug(f"Will use UnRAR for RAR extraction: {UNRAR_PATH}")
-elif SEVEN_ZIP_PATH:
-    logger.debug(f"Will use 7-Zip for RAR extraction: {SEVEN_ZIP_PATH}")
-else:
+if not UNRAR_PATH and not SEVEN_ZIP_PATH:
     logger.warning("No RAR extraction tool found. RAR files will be skipped.")
 
 
@@ -88,7 +80,6 @@ def scan_root_directory(root_path: str, folder_prefix: str) -> List[str]:
             
             if os.path.isdir(item_path) and item.startswith(folder_prefix):
                 matching_folders.append(item_path)
-                logger.debug(f"Found matching folder: {item_path}")
         
         logger.info(f"Found {len(matching_folders)} folders starting with '{folder_prefix}'")
         
@@ -122,18 +113,15 @@ def find_gis_resources(folder_path: str) -> Tuple[Optional[str], Optional[str], 
             # Check for GIS folder
             if os.path.isdir(item_path) and item_lower == 'gis':
                 gis_folder = item_path
-                logger.debug(f"Found GIS folder: {item_path}")
             
             # Check for GDB
             elif os.path.isdir(item_path) and item_lower.endswith('.gdb'):
                 gdb_path = item_path
-                logger.debug(f"Found GDB: {item_path}")
             
             # Check for compressed files
             elif os.path.isfile(item_path):
                 if item_lower.endswith(('.7z', '.zip', '.rar')):
                     compressed_files.append(item_path)
-                    logger.debug(f"Found compressed file: {item_path}")
         
     except Exception as e:
         logger.error(f"Error scanning folder '{folder_path}': {e}")
@@ -152,7 +140,6 @@ def _add_to_skip_list(archive_path: str, skip_file: str) -> None:
     try:
         with open(skip_file, 'a', encoding='utf-8') as f:
             f.write(f"{archive_path}\n")
-        logger.debug(f"Added to skip list: {archive_path}")
     except Exception as e:
         logger.warning(f"Could not write to {skip_file}: {e}")
 
@@ -173,7 +160,6 @@ def get_extracted_files_dir() -> str:
     # Create directory if it doesn't exist
     if not os.path.exists(extract_dir):
         os.makedirs(extract_dir)
-        logger.info(f"Created extraction directory: {extract_dir}")
     
     return extract_dir
 
@@ -214,7 +200,6 @@ def extract_archive(archive_path: str, extract_to: Optional[str] = None, source_
         extract_to = os.path.join(extract_to, source_directory_name)
         if not os.path.exists(extract_to):
             os.makedirs(extract_to)
-            logger.debug(f"Created extraction subdirectory: {extract_to}")
     
     archive_lower = archive_path.lower()
     skip_file = get_extraction_tracker_file()
@@ -231,7 +216,6 @@ def extract_archive(archive_path: str, extract_to: Optional[str] = None, source_
         else:
             # Create the file if it doesn't exist
             open(skip_file, 'w', encoding='utf-8').close()
-            logger.debug(f"Created {skip_file} for tracking extracted archives")
     except Exception as e:
         logger.warning(f"Could not read {skip_file}: {e}. Proceeding with extraction.")
     
@@ -318,34 +302,6 @@ def extract_archive(archive_path: str, extract_to: Optional[str] = None, source_
         return False
 
 
-def get_extracted_gdb_path(archive_path: str) -> Optional[str]:
-    """
-    Get the path where GDB should be after extraction from an archive
-    
-    Args:
-        archive_path: Path to the original archive file
-        
-    Returns:
-        Path to extracted GDB location or None if not found
-    """
-    extract_dir = get_extracted_files_dir()
-    archive_name = os.path.splitext(os.path.basename(archive_path))[0]
-    extracted_folder = os.path.join(extract_dir, archive_name)
-    
-    if os.path.exists(extracted_folder):
-        # Search for GDB in extracted folder
-        _, gdb_path, _ = find_gis_resources(extracted_folder)
-        if gdb_path:
-            return gdb_path
-        
-        # Also check for GIS subfolder
-        gis_folder = os.path.join(extracted_folder, 'GIS')
-        if os.path.exists(gis_folder):
-            _, gdb_path, _ = find_gis_resources(gis_folder)
-            if gdb_path:
-                return gdb_path
-    
-    return None
 
 
 def get_source_directory_name(folder_path: str, folder_prefix: str) -> str:
@@ -368,7 +324,6 @@ def get_source_directory_name(folder_path: str, folder_prefix: str) -> str:
         if part.startswith(folder_prefix):
             # Return path up to and including this folder
             result = str(Path(*parts[:i+1]))
-            logger.debug(f"Extracted source directory: {result} from {folder_path}")
             return result
     
     # If no match found, return the folder path itself
@@ -393,91 +348,13 @@ def get_extraction_user(archive_path: str) -> str:
         return os.getenv('USERNAME', 'unknown')
 
 
-def check_if_directory_already_processed(source_dir: str) -> bool:
-    """
-    Check if a directory has already been processed by checking extracted_here_files.txt
-    
-    Args:
-        source_dir: Source directory to check
-        
-    Returns:
-        True if already processed, False otherwise
-    """
-    try:
-        tracker_file = get_extraction_tracker_file()
-        
-        if not os.path.exists(tracker_file):
-            return False
-        
-        # Normalize the source directory path
-        source_dir_normalized = os.path.normpath(source_dir).lower()
-        
-        with open(tracker_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Check if this line's directory matches our source directory
-                line_dir = os.path.dirname(os.path.normpath(line)).lower()
-                if line_dir == source_dir_normalized:
-                    logger.info(f"Directory already processed (found in tracker): {source_dir}")
-                    return True
-        
-        return False
-        
-    except Exception as e:
-        logger.warning(f"Could not check tracker file: {e}")
-        return False
 
 
-def copy_gdb_files_only(source_dir: str) -> int:
-    """
-    Copy only .gdb directories from source directory to extracted_files directory
-    
-    Args:
-        source_dir: Source directory to copy from
-        
-    Returns:
-        Number of GDB directories copied
-    """
-    try:
-        extract_dir = get_extracted_files_dir()
-        
-        logger.info(f"Copying only GDB files from {source_dir} to {extract_dir}")
-        
-        copied_count = 0
-        for item in os.listdir(source_dir):
-            source_path = os.path.join(source_dir, item)
-            
-            # Only copy .gdb directories
-            if os.path.isdir(source_path) and item.lower().endswith('.gdb'):
-                dest_path = os.path.join(extract_dir, item)
-                
-                # Skip if already exists in destination
-                if os.path.exists(dest_path):
-                    logger.debug(f"Skipping {item}, already exists in extraction directory")
-                    continue
-                
-                try:
-                    shutil.copytree(source_path, dest_path)
-                    logger.info(f"Copied GDB: {item}")
-                    copied_count += 1
-                except Exception as e:
-                    logger.warning(f"Could not copy {item}: {e}")
-        
-        logger.info(f"Copied {copied_count} GDB file(s) to extraction directory")
-        return copied_count
-        
-    except Exception as e:
-        logger.error(f"Error copying GDB files: {e}")
-        return 0
 
 
 def organize_gdbs_in_source_directory(source_directory_name: str) -> int:
     """
-    After extraction, find all GDBs recursively, copy them to source directory root,
-    and delete all non-GDB files
+    After extraction, find all GDBs recursively and copy them to source directory root
     
     Args:
         source_directory_name: Name of source directory
@@ -537,60 +414,7 @@ def organize_gdbs_in_source_directory(source_directory_name: str) -> int:
             except Exception as e:
                 logger.error(f"Could not copy {gdb_name}: {e}")
         
-        # Now delete everything except GDB folders at root level
-        logger.info(f"Cleaning up non-GDB files from {source_extract_dir}")
-        gdb_names_at_root = {os.path.basename(g).lower() for g in gdbs_at_root}
-        
-        removed_count = 0
-        items_to_remove = []
-        
-        # First, collect all items to remove
-        try:
-            for item in os.listdir(source_extract_dir):
-                item_path = os.path.join(source_extract_dir, item)
-                
-                # Keep only .gdb directories (not files ending with .gdb, only directories)
-                if os.path.isdir(item_path) and item.lower().endswith('.gdb') and item.lower() in gdb_names_at_root:
-                    logger.debug(f"Keeping GDB directory: {item}")
-                    continue
-                
-                # Also keep .gitkeep files
-                if item.lower().endswith('.gitkeep'):
-                    continue
-                
-                # Everything else should be removed
-                items_to_remove.append((item, item_path))
-        except Exception as e:
-            logger.error(f"Error listing directory {source_extract_dir}: {e}")
-        
-        # Now remove all non-GDB items
-        for item, item_path in items_to_remove:
-            try:
-                if os.path.isdir(item_path):
-                    logger.info(f"Removing non-GDB directory: {item}")
-                    shutil.rmtree(item_path)
-                else:
-                    logger.info(f"Removing non-GDB file: {item}")
-                    os.remove(item_path)
-                removed_count += 1
-            except Exception as e:
-                logger.warning(f"Could not remove {item}: {e}")
-        
-        logger.info(f"Organized {len(gdbs_at_root)} GDB file(s), removed {removed_count} non-GDB items")
-        
-        # Verify cleanup - list what remains
-        try:
-            remaining_items = os.listdir(source_extract_dir)
-            gdb_items = [item for item in remaining_items if item.lower().endswith('.gdb')]
-            non_gdb_items = [item for item in remaining_items if not item.lower().endswith('.gdb') and not item.lower().endswith('.gitkeep')]
-            
-            if non_gdb_items:
-                logger.warning(f"WARNING: {len(non_gdb_items)} non-GDB items still remain: {non_gdb_items}")
-            else:
-                logger.info(f"Cleanup verified: Only {len(gdb_items)} GDB directories remain")
-        except Exception as e:
-            logger.warning(f"Could not verify cleanup: {e}")
-        
+        logger.info(f"Organized {len(gdbs_at_root)} GDB file(s)")
         return len(gdbs_at_root)
         
     except Exception as e:
@@ -598,43 +422,6 @@ def organize_gdbs_in_source_directory(source_directory_name: str) -> int:
         return 0
 
 
-def cleanup_extracted_files_dir() -> None:
-    """
-    Clean up extracted files directory by removing all empty source directories
-    """
-    try:
-        extract_dir = get_extracted_files_dir()
-        
-        if not os.path.exists(extract_dir):
-            logger.debug("Extraction directory doesn't exist, nothing to clean")
-            return
-        
-        logger.info(f"Cleaning up extraction directory: {extract_dir}")
-        
-        removed_count = 0
-        for item in os.listdir(extract_dir):
-            item_path = os.path.join(extract_dir, item)
-            
-            # Skip .gitkeep files
-            if item.lower().endswith('.gitkeep'):
-                continue
-            
-            # Remove empty directories
-            if os.path.isdir(item_path):
-                try:
-                    # Check if directory is empty or only contains .gitkeep
-                    contents = os.listdir(item_path)
-                    if not contents or (len(contents) == 1 and contents[0].lower().endswith('.gitkeep')):
-                        shutil.rmtree(item_path)
-                        logger.debug(f"Removed empty directory: {item}")
-                        removed_count += 1
-                except Exception as e:
-                    logger.warning(f"Could not remove {item}: {e}")
-        
-        logger.info(f"Cleanup complete. Removed {removed_count} empty directories")
-        
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}")
 
 
 def find_all_gdbs_recursively(directory: str) -> List[str]:
@@ -659,9 +446,8 @@ def find_all_gdbs_recursively(directory: str) -> List[str]:
                 if dir_name.lower().endswith('.gdb'):
                     gdb_path = os.path.join(root, dir_name)
                     gdb_paths.append(gdb_path)
-                    logger.debug(f"Found GDB: {gdb_path}")
         
-        logger.info(f"Found {len(gdb_paths)} GDB file(s) in {directory} (recursive search)")
+        logger.info(f"Found {len(gdb_paths)} GDB file(s) in {directory}")
         return gdb_paths
         
     except Exception as e:
@@ -669,54 +455,26 @@ def find_all_gdbs_recursively(directory: str) -> List[str]:
         return []
 
 
-def find_all_gdbs_in_extracted_dir() -> List[str]:
-    """
-    Find all GDB files in the extracted_files directory (recursively)
-    
-    Returns:
-        List of GDB paths
-    """
-    try:
-        extract_dir = get_extracted_files_dir()
-        gdb_paths = []
-        
-        if not os.path.exists(extract_dir):
-            return gdb_paths
-        
-        # Recursively search for all .gdb directories
-        for root, dirs, files in os.walk(extract_dir):
-            for dir_name in dirs:
-                if dir_name.lower().endswith('.gdb'):
-                    gdb_path = os.path.join(root, dir_name)
-                    gdb_paths.append(gdb_path)
-                    logger.debug(f"Found GDB: {gdb_path}")
-        
-        logger.info(f"Found {len(gdb_paths)} GDB file(s) in extraction directory (recursive search)")
-        return gdb_paths
-        
-    except Exception as e:
-        logger.error(f"Error finding GDBs: {e}")
-        return []
 
 
 def get_gis_resources_size_gb(directory: str, max_size_gb: float = None) -> float:
     """
-    Calculate the size of only GIS-relevant resources (compressed files and .gdb directories)
-    Checks first level + GIS subfolder if it exists (not fully recursive)
-    This is much faster than calculating the entire directory size
+    Calculate the size of only GIS-relevant resources at first level:
+    - Compressed files (.zip, .7z, .rar)
+    - Files ending with .gdb (not directories)
     
     Args:
         directory: Path to directory
         max_size_gb: Optional maximum size threshold. If exceeded, stops calculation
         
     Returns:
-        Size in GB of only compressed files and .gdb directories at first level (and GIS subfolder)
+        Size in GB of only compressed files and .gdb files at first level
     """
     try:
         total_size = 0
         max_size_bytes = max_size_gb * (1024 ** 3) if max_size_gb else None
         
-        # Function to check a single directory level
+        # Function to check files in a single directory level
         def check_directory_level(dir_path):
             nonlocal total_size
             
@@ -724,31 +482,18 @@ def get_gis_resources_size_gb(directory: str, max_size_gb: float = None) -> floa
                 items = os.listdir(dir_path)
             except (OSError, PermissionError) as e:
                 logger.error(f"Cannot access directory {dir_path}: {e}")
-                return
+                return False
             
             for item in items:
                 item_path = os.path.join(dir_path, item)
                 
                 try:
-                    # Check if it's a .gdb directory
-                    if os.path.isdir(item_path) and item.lower().endswith('.gdb'):
-                        # Calculate size of entire .gdb directory (recursively inside the .gdb)
-                        for gdb_root, gdb_subdirs, gdb_files in os.walk(item_path):
-                            for gdb_file in gdb_files:
-                                try:
-                                    file_path = os.path.join(gdb_root, gdb_file)
-                                    if not os.path.islink(file_path):
-                                        total_size += os.path.getsize(file_path)
-                                        
-                                        # Early exit check
-                                        if max_size_bytes and total_size > max_size_bytes:
-                                            return True  # Signal to stop
-                                except (OSError, FileNotFoundError) as e:
-                                    logger.warning(f"Could not get size of {file_path}: {e}")
-                    
-                    # Check if it's a compressed file
-                    elif os.path.isfile(item_path) and item.lower().endswith(('.zip', '.7z', '.rar')):
-                        if not os.path.islink(item_path):
+                    # Only check FILES (not directories)
+                    if os.path.isfile(item_path) and not os.path.islink(item_path):
+                        item_lower = item.lower()
+                        
+                        # Check if it's a compressed file or .gdb file
+                        if item_lower.endswith(('.zip', '.7z', '.rar', '.gdb')):
                             total_size += os.path.getsize(item_path)
                             
                             # Early exit check
@@ -765,7 +510,6 @@ def get_gis_resources_size_gb(directory: str, max_size_gb: float = None) -> floa
         should_stop = check_directory_level(directory)
         if should_stop:
             size_gb = total_size / (1024 ** 3)
-            logger.debug(f"GIS resources in {directory} exceeded {max_size_gb} GB threshold at {size_gb:.2f} GB")
             return size_gb
         
         # Also check GIS subfolder if it exists
@@ -774,12 +518,10 @@ def get_gis_resources_size_gb(directory: str, max_size_gb: float = None) -> floa
             should_stop = check_directory_level(gis_folder)
             if should_stop:
                 size_gb = total_size / (1024 ** 3)
-                logger.debug(f"GIS resources in {directory} exceeded {max_size_gb} GB threshold at {size_gb:.2f} GB")
                 return size_gb
         
         # Convert bytes to GB
         size_gb = total_size / (1024 ** 3)
-        logger.debug(f"GIS resources in {directory}: {size_gb:.2f} GB (compressed files + .gdb directories at first level)")
         return size_gb
         
     except Exception as e:
@@ -787,117 +529,3 @@ def get_gis_resources_size_gb(directory: str, max_size_gb: float = None) -> floa
         return 0.0
 
 
-def get_directory_size_gb(directory: str, max_size_gb: float = None) -> float:
-    """
-    Calculate the total size of a directory in GB using OS-native commands for speed
-    Works on both Windows and Linux
-    Can stop early if max_size_gb threshold is exceeded
-    
-    Args:
-        directory: Path to directory
-        max_size_gb: Optional maximum size threshold. If exceeded, stops calculation
-        
-    Returns:
-        Size in GB (or current size if max_size_gb was exceeded)
-    """
-    try:
-        import platform
-        
-        # Note: OS-native commands (PowerShell, du) don't support early exit easily
-        # So we always use the fallback method when max_size_gb is specified for better control
-        if max_size_gb is not None:
-            logger.debug(f"Using fallback method with early exit for {directory}")
-            return _get_directory_size_gb_fallback(directory, max_size_gb)
-        
-        if platform.system() == 'Windows':
-            # Use PowerShell for Windows
-            cmd = f'powershell -Command "(Get-ChildItem -Path \'{directory}\' -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum"'
-            
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            
-            if result.returncode == 0 and result.stdout.strip():
-                total_bytes = int(result.stdout.strip())
-                size_gb = total_bytes / (1024 ** 3)
-                logger.debug(f"Directory {directory} size: {size_gb:.2f} GB")
-                return size_gb
-            else:
-                logger.warning(f"PowerShell command failed, falling back to Python method")
-                return _get_directory_size_gb_fallback(directory, max_size_gb)
-                
-        elif platform.system() == 'Linux':
-            # Use du command for Linux (much faster than os.walk)
-            # du -sb returns size in bytes
-            result = subprocess.run(
-                ['du', '-sb', directory],
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            
-            if result.returncode == 0 and result.stdout.strip():
-                # du output format: "SIZE\tDIRECTORY"
-                total_bytes = int(result.stdout.split()[0])
-                size_gb = total_bytes / (1024 ** 3)
-                logger.debug(f"Directory {directory} size: {size_gb:.2f} GB")
-                return size_gb
-            else:
-                logger.warning(f"du command failed, falling back to Python method")
-                return _get_directory_size_gb_fallback(directory, max_size_gb)
-        else:
-            # For other systems (Mac, etc), fall back to Python method
-            logger.debug(f"Unknown OS, using Python fallback method")
-            return _get_directory_size_gb_fallback(directory, max_size_gb)
-        
-    except Exception as e:
-        logger.warning(f"Error with OS-native size calculation, using fallback: {e}")
-        return _get_directory_size_gb_fallback(directory, max_size_gb)
-
-
-def _get_directory_size_gb_fallback(directory: str, max_size_gb: float = None) -> float:
-    """
-    Fallback method using Python's os.walk (slower but works everywhere)
-    Can stop early if max_size_gb is exceeded
-    
-    Args:
-        directory: Path to directory
-        max_size_gb: Optional maximum size threshold. If exceeded, stops calculation and returns current size
-        
-    Returns:
-        Size in GB (or current size if max_size_gb was exceeded)
-    """
-    try:
-        total_size = 0
-        max_size_bytes = max_size_gb * (1024 ** 3) if max_size_gb else None
-        
-        for dirpath, dirnames, filenames in os.walk(directory):
-            for filename in filenames:
-                filepath = os.path.join(dirpath, filename)
-                try:
-                    # Skip symbolic links
-                    if not os.path.islink(filepath):
-                        total_size += os.path.getsize(filepath)
-                        
-                        # Early exit if we've exceeded the maximum
-                        if max_size_bytes and total_size > max_size_bytes:
-                            size_gb = total_size / (1024 ** 3)
-                            logger.debug(f"Directory {directory} exceeded {max_size_gb} GB threshold, stopping calculation at {size_gb:.2f} GB")
-                            return size_gb
-                            
-                except (OSError, FileNotFoundError) as e:
-                    logger.warning(f"Could not get size of {filepath}: {e}")
-                    continue
-        
-        # Convert bytes to GB
-        size_gb = total_size / (1024 ** 3)
-        logger.debug(f"Directory {directory} size: {size_gb:.2f} GB")
-        return size_gb
-        
-    except Exception as e:
-        logger.error(f"Error calculating directory size: {e}")
-        return 0.0
