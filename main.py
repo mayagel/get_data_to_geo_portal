@@ -6,6 +6,8 @@ import os
 import sys
 from typing import Optional
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import shutil
 
 # Import ArcPy
 import arcpy
@@ -29,7 +31,7 @@ from database import (
     get_ingestion_id_for_gdb,
     create_versioned_table_from_gdb_fields,
     import_features_to_versioned_table,
-    update_excavationcenter_header,
+    update_Center_Excavations_header,
     debug_table_existence
 )
 from file_scanner import (
@@ -43,7 +45,10 @@ from file_scanner import (
     find_all_gdbs_in_extracted_dir,
     get_extracted_files_dir,
     check_if_directory_already_processed,
-    copy_gdb_files_only
+    copy_gdb_files_only,
+    get_gis_resources_size_gb,
+    organize_gdbs_in_source_directory,
+    find_all_gdbs_recursively
 )
 from gdb_handler import (
     open_fgdb,
@@ -65,7 +70,8 @@ def process_gdb(
     gdb_path: str,
     source_directory: str,
     sde_connection: str,
-    batch_id: int
+    batch_id: int,
+    from_compressed: bool = False
 ) -> bool:
     """
     Process a File Geodatabase using new versioned table structure
@@ -75,6 +81,7 @@ def process_gdb(
         source_directory: Source directory path (up to A- folder)
         sde_connection: SDE connection path
         batch_id: Batch ID for this ingestion run
+        from_compressed: Whether the GDB came from a compressed file
         
     Returns:
         True if processing was successful
@@ -132,8 +139,8 @@ def process_gdb(
             # Get or create version for this geometry + column combination
             version = get_or_create_version(geom_type_norm, column_set, sde_connection, gdb_path, source_directory)
             
-            # Build table name: excavationcenter_header_rows_{geom}_{ver}
-            table_name = f"excavationcenter_header_rows_{geom_type_norm}_{version}"
+            # Build table name: Center_Excavations_header_rows_{geom}_{ver}
+            table_name = f"Center_Excavations_header_rows_{geom_type_norm}_{version}"
             
             logger.info(f"Layer '{layer_name}' -> Table '{table_name}' (ingestion_id: {ingestion_id})")
             
@@ -183,14 +190,15 @@ def process_gdb(
         
         # Update summary table
         if layer_stats:
-            logger.info(f"Updating excavationcenter_header for ingestion_id {ingestion_id}")
-            update_excavationcenter_header(
+            logger.info(f"Updating Center_Excavations_header for ingestion_id {ingestion_id}")
+            update_Center_Excavations_header(
                 sde_connection=sde_connection,
                 ingestion_id=ingestion_id,
                 gdb_path=gdb_path,
                 source_directory=source_directory,
                 layer_stats=layer_stats,
-                creation_user=current_user
+                creation_user=current_user,
+                from_compressed=from_compressed
             )
         
         return True
@@ -240,33 +248,68 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
     
     # If we have GIS resources (GDB or compressed files), process them
     if gis_folder or gdb_path or compressed_files:
-        # Copy only GDB files to extraction directory (not everything)
-        logger.info("Copying GDB files to extraction directory...")
-        copy_gdb_files_only(check_folder)
+        # Get source directory base name for organizing extracted files
+        source_dir_basename = os.path.basename(source_directory)
+        extraction_subdir = os.path.join(get_extracted_files_dir(), source_dir_basename)
+        
+        # Create source-specific subdirectory in extracted_files
+        if not os.path.exists(extraction_subdir):
+            os.makedirs(extraction_subdir)
+            logger.info(f"Created extraction subdirectory: {extraction_subdir}")
+        
+        # Track which GDBs existed before extraction (directly copied, not from compressed)
+        gdbs_before_extraction = set()
+        
+        # Copy only GDB files to extraction subdirectory (not everything)
+        logger.info(f"Copying GDB files to {extraction_subdir}...")
+        # Copy GDBs from check_folder to extraction_subdir
+        try:
+            for item in os.listdir(check_folder):
+                source_path = os.path.join(check_folder, item)
+                if os.path.isdir(source_path) and item.lower().endswith('.gdb'):
+                    dest_path = os.path.join(extraction_subdir, item)
+                    if not os.path.exists(dest_path):
+                        try:
+                            shutil.copytree(source_path, dest_path)
+                            logger.info(f"Copied GDB: {item}")
+                        except Exception as e:
+                            logger.warning(f"Could not copy {item}: {e}")
+        except Exception as e:
+            logger.warning(f"Error listing directory {check_folder}: {e}")
+        
+        # Get list of GDBs that were directly copied (not from compressed files)
+        gdbs_before_extraction = set(find_all_gdbs_recursively(extraction_subdir))
+        logger.info(f"Found {len(gdbs_before_extraction)} GDB(s) directly from source (not compressed)")
         
         # Extract compressed files if found
         if compressed_files:
             logger.info(f"Found {len(compressed_files)} compressed file(s) - extracting...")
             for archive_path in compressed_files:
-                # Extract directly to extracted_files directory
-                extract_archive(archive_path)
+                # Extract to source-specific subdirectory
+                extract_archive(archive_path, source_directory_name=source_dir_basename)
+            
+            # Organize extracted GDBs: find them recursively, copy to root, delete non-GDB files
+            logger.info("Organizing extracted GDB files...")
+            organize_gdbs_in_source_directory(source_dir_basename)
         
-        # Clean up - remove all non-GDB files
-        logger.info("Cleaning up non-GDB files from extraction directory...")
-        cleanup_extracted_files_dir()
+        # Find all GDB files in the source-specific extraction directory
+        all_gdb_paths = find_all_gdbs_recursively(extraction_subdir)
         
-        # Find all GDB files in extraction directory
-        gdb_paths = find_all_gdbs_in_extracted_dir()
-        
-        if not gdb_paths:
+        if not all_gdb_paths:
             logger.warning(f"No GDB files found after extraction in {folder_path}")
             return False
         
+        # Determine which GDBs came from compressed files
+        gdbs_from_compressed = set(all_gdb_paths) - gdbs_before_extraction
+        logger.info(f"Found {len(gdbs_from_compressed)} GDB(s) from compressed files")
+        logger.info(f"Total GDBs to process: {len(all_gdb_paths)}")
+        
         # Process all GDB files found
         success_count = 0
-        for gdb_path in gdb_paths:
-            logger.info(f"Processing GDB: {gdb_path}")
-            if process_gdb(gdb_path, source_directory, sde_connection, batch_id):
+        for gdb_path in all_gdb_paths:
+            is_from_compressed = gdb_path in gdbs_from_compressed
+            logger.info(f"Processing GDB: {gdb_path} (from_compressed: {is_from_compressed})")
+            if process_gdb(gdb_path, source_directory, sde_connection, batch_id, from_compressed=is_from_compressed):
                 success_count += 1
                 logger.info(f"Successfully processed GDB: {gdb_path}")
             else:
@@ -377,9 +420,54 @@ def main():
             logger.warning(f"No folders found starting with '{FOLDER_PREFIX}' in {ROOT_PATH}")
             return
         
+        # Filter folders by GIS resources size (keep only those 60GB or under) - using parallel threads
+        logger.info(f"Checking GIS resources size (compressed files + .gdb) for {len(matching_folders)} source directories in parallel...")
+        folders_to_process = []
+        skipped_folders = []
+        
+        # Use ThreadPoolExecutor to check sizes in parallel
+        max_workers = min(10, len(matching_folders))  # Use up to 10 threads
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all size calculation tasks with 60GB threshold for early exit
+            future_to_folder = {
+                executor.submit(get_gis_resources_size_gb, folder_path, 60): folder_path 
+                for folder_path in matching_folders
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_folder):
+                folder_path = future_to_folder[future]
+                try:
+                    folder_size_gb = future.result()
+                    if folder_size_gb <= 60:
+                        folders_to_process.append(folder_path)
+                        logger.debug(f"{folder_path}: {folder_size_gb:.2f} GB - will process")
+                    else:
+                        skipped_folders.append((folder_path, folder_size_gb))
+                        logger.debug(f"{folder_path}: {folder_size_gb:.2f} GB - skipping (over 60GB)")
+                except Exception as e:
+                    logger.error(f"Error calculating size for {folder_path}: {e}")
+                    # Skip this folder if we can't calculate its size
+                    skipped_folders.append((folder_path, 0))
+        
+        # Log summary
+        logger.info("=" * 80)
+        logger.info(f"{len(matching_folders)} source directories with '{FOLDER_PREFIX}' prefix were found")
+        logger.info(f"{len(folders_to_process)} from this list are 60GB or under (GIS resources) and will be processed")
+        if skipped_folders:
+            logger.info(f"{len(skipped_folders)} directories skipped due to GIS resources size > 60GB:")
+            for skipped_path, size_gb in skipped_folders:
+                logger.info(f"  - {os.path.basename(skipped_path)}: {size_gb:.2f} GB (compressed files + .gdb)")
+        logger.info("=" * 80)
+        
+        if not folders_to_process:
+            logger.warning("No folders to process after size filtering")
+            return
+        
         # Process each folder
         success_count = 0
-        for folder_path in matching_folders:
+        for folder_path in folders_to_process:
             try:
                 if process_folder(folder_path, sde_conn, batch_id):
                     success_count += 1

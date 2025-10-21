@@ -179,14 +179,14 @@ def load_existing_versions_from_db(sde_connection: str) -> None:
     try:
         arcpy.env.workspace = sde_connection
         
-        # List all tables starting with excavationcenter_header_rows_
-        all_tables = arcpy.ListTables("excavationcenter_header_rows_*")
-        all_fcs = arcpy.ListFeatureClasses("excavationcenter_header_rows_*")
+        # List all tables starting with Center_Excavations_header_rows_
+        all_tables = arcpy.ListTables("Center_Excavations_header_rows_*")
+        all_fcs = arcpy.ListFeatureClasses("Center_Excavations_header_rows_*")
         
         tables = (all_tables or []) + (all_fcs or [])
         
         for table_name in tables:
-            # Parse table name: excavationcenter_header_rows_{geom}_{ver}
+            # Parse table name: Center_Excavations_header_rows_{geom}_{ver}
             parts = table_name.split('_')
             if len(parts) >= 6:
                 geom_type = parts[4]  # poly/line/point
@@ -488,7 +488,7 @@ def create_versioned_table_from_gdb_fields(
     
     Args:
         sde_connection: SDE connection path
-        table_name: Name of the table to create (e.g., excavationcenter_header_rows_poly_verA)
+        table_name: Name of the table to create (e.g., Center_Excavations_header_rows_poly_verA)
         gdb_fields: List of field definitions from GDB
         geometry_type: Geometry type (Point, Polyline, Polygon, etc.)
         spatial_reference: Spatial reference object
@@ -502,6 +502,12 @@ def create_versioned_table_from_gdb_fields(
         
         # Force refresh the workspace to clear any cached metadata
         arcpy.ClearWorkspaceCache_management()
+        
+        # Check if table already exists
+        table_path = f"{sde_connection}\\{table_name}"
+        if arcpy.Exists(table_path):
+            logger.info(f"Table '{table_name}' already exists, skipping creation")
+            return True
         
         # Default spatial reference if not provided (Israel TM Grid - EPSG:2039)
         if spatial_reference is None:
@@ -942,9 +948,9 @@ def import_features_to_table(
         return False
 
 
-def ensure_excavationcenter_header_table(sde_connection: str) -> bool:
+def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
     """
-    Ensure the excavationcenter_header summary table exists
+    Ensure the Center_Excavations_header summary table exists
     
     Table structure:
     - Oid (auto)
@@ -961,6 +967,7 @@ def ensure_excavationcenter_header_table(sde_connection: str) -> bool:
     - point_count (number of point features)
     - f_name (GDB file name)
     - s_dir (source directory)
+    - from_compressed (1 if GDB came from compressed file, 0 otherwise)
     
     Args:
         sde_connection: SDE connection path
@@ -970,7 +977,7 @@ def ensure_excavationcenter_header_table(sde_connection: str) -> bool:
     """
     try:
         arcpy.env.workspace = sde_connection
-        table_name = "excavationcenter_header"
+        table_name = "Center_Excavations_header"
         table_path = f"{sde_connection}\\{table_name}"
         
         if arcpy.Exists(table_path):
@@ -995,6 +1002,7 @@ def ensure_excavationcenter_header_table(sde_connection: str) -> bool:
         arcpy.AddField_management(table_path, "point_count", "LONG")
         arcpy.AddField_management(table_path, "f_name", "TEXT", field_length=255)
         arcpy.AddField_management(table_path, "s_dir", "TEXT", field_length=500)
+        arcpy.AddField_management(table_path, "from_compressed", "SHORT")
         
         logger.info(f"Successfully created summary table '{table_name}' with all fields")
         return True
@@ -1004,16 +1012,17 @@ def ensure_excavationcenter_header_table(sde_connection: str) -> bool:
         return False
 
 
-def update_excavationcenter_header(
+def update_Center_Excavations_header(
     sde_connection: str,
     ingestion_id: int,
     gdb_path: str,
     source_directory: str,
     layer_stats: Dict[str, Dict],
-    creation_user: str = 'unknown'
+    creation_user: str = 'unknown',
+    from_compressed: bool = False
 ) -> bool:
     """
-    Update or insert a row in the excavationcenter_header summary table
+    Update or insert a row in the Center_Excavations_header summary table
     
     Args:
         sde_connection: SDE connection path
@@ -1023,6 +1032,7 @@ def update_excavationcenter_header(
         layer_stats: Dictionary with stats per geometry type
                      Format: {'poly': {'version': 'verA', 'count': 10}, 'line': {...}, 'point': {...}}
         creation_user: User creating/updating the record
+        from_compressed: Whether the GDB came from a compressed file (True) or not (False)
         
     Returns:
         True if successful
@@ -1031,11 +1041,11 @@ def update_excavationcenter_header(
         import os
         
         # Ensure table exists
-        if not ensure_excavationcenter_header_table(sde_connection):
+        if not ensure_Center_Excavations_header_table(sde_connection):
             return False
         
         arcpy.env.workspace = sde_connection
-        table_name = "excavationcenter_header"
+        table_name = "Center_Excavations_header"
         table_path = f"{sde_connection}\\{table_name}"
         
         # Extract GDB file name
@@ -1048,6 +1058,7 @@ def update_excavationcenter_header(
         poly_count = layer_stats.get('poly', {}).get('count', 0)
         line_count = layer_stats.get('line', {}).get('count', 0)
         point_count = layer_stats.get('point', {}).get('count', 0)
+        from_compressed_value = 1 if from_compressed else 0
         
         current_time = datetime.now()
         
@@ -1062,24 +1073,24 @@ def update_excavationcenter_header(
         if existing_count > 0:
             # Update existing record
             update_fields = ['update_date', 'update_user', 'poly_ver', 'line_ver', 'point_ver',
-                           'poly_count', 'line_count', 'point_count']
+                           'poly_count', 'line_count', 'point_count', 'from_compressed']
             
             with arcpy.da.UpdateCursor(table_path, update_fields, where_clause=where_clause) as cursor:
                 for row in cursor:
                     cursor.updateRow([current_time, creation_user, poly_ver, line_ver, point_ver,
-                                     poly_count, line_count, point_count])
+                                     poly_count, line_count, point_count, from_compressed_value])
             
             logger.info(f"Updated summary record for ingestion_id {ingestion_id}")
         else:
             # Insert new record
             insert_fields = ['creation_date', 'update_date', 'creation_user', 'update_user',
                            'poly_ver', 'line_ver', 'point_ver', 'ingestion_id',
-                           'poly_count', 'line_count', 'point_count', 'f_name', 's_dir']
+                           'poly_count', 'line_count', 'point_count', 'f_name', 's_dir', 'from_compressed']
             
             with arcpy.da.InsertCursor(table_path, insert_fields) as cursor:
                 cursor.insertRow([current_time, current_time, creation_user, creation_user,
                                  poly_ver, line_ver, point_ver, ingestion_id,
-                                 poly_count, line_count, point_count, gdb_filename, source_directory])
+                                 poly_count, line_count, point_count, gdb_filename, source_directory, from_compressed_value])
             
             logger.info(f"Inserted new summary record for ingestion_id {ingestion_id}")
         
