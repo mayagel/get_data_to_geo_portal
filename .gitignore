@@ -2,3 +2,7 @@ config.py
 poetry.lock
 __pycache__/
 logs
+extracted_files
+skip_the_extract.txt
+extracted_here_files.txt
+layers_version.txt

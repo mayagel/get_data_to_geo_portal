@@ -157,23 +157,59 @@ def _add_to_skip_list(archive_path: str, skip_file: str) -> None:
         logger.warning(f"Could not write to {skip_file}: {e}")
 
 
+def get_extracted_files_dir() -> str:
+    """
+    Get the extraction directory, creating it if needed
+    
+    Returns:
+        Path to extraction directory
+    """
+    try:
+        from config import EXTRACTED_FILES_DIR
+        extract_dir = EXTRACTED_FILES_DIR
+    except ImportError:
+        extract_dir = os.path.join(os.path.dirname(__file__), 'extracted_files')
+    
+    # Create directory if it doesn't exist
+    if not os.path.exists(extract_dir):
+        os.makedirs(extract_dir)
+        logger.info(f"Created extraction directory: {extract_dir}")
+    
+    return extract_dir
+
+
+def get_extraction_tracker_file() -> str:
+    """
+    Get the extraction tracker file path
+    
+    Returns:
+        Path to tracker file
+    """
+    try:
+        from config import EXTRACTED_FILES_TRACKER
+        return EXTRACTED_FILES_TRACKER
+    except ImportError:
+        return "extracted_here_files.txt"
+
+
 def extract_archive(archive_path: str, extract_to: Optional[str] = None) -> bool:
     """
     Extract compressed archive (7z, zip, or rar)
-    Tracks extracted files in skip_the_extract.txt to avoid re-extraction
+    Tracks extracted files in extracted_here_files.txt to avoid re-extraction
+    Extracts to configured EXTRACTED_FILES_DIR
     
     Args:
         archive_path: Path to archive file
-        extract_to: Destination directory (defaults to archive's directory)
+        extract_to: Destination directory (defaults to EXTRACTED_FILES_DIR)
         
     Returns:
         True if successful, False otherwise
     """
     if extract_to is None:
-        extract_to = os.path.dirname(archive_path)
+        extract_to = get_extracted_files_dir()
     
     archive_lower = archive_path.lower()
-    skip_file = "skip_the_extract.txt"
+    skip_file = get_extraction_tracker_file()
     
     # Check if this archive was already extracted
     try:
@@ -274,6 +310,36 @@ def extract_archive(archive_path: str, extract_to: Optional[str] = None) -> bool
         return False
 
 
+def get_extracted_gdb_path(archive_path: str) -> Optional[str]:
+    """
+    Get the path where GDB should be after extraction from an archive
+    
+    Args:
+        archive_path: Path to the original archive file
+        
+    Returns:
+        Path to extracted GDB location or None if not found
+    """
+    extract_dir = get_extracted_files_dir()
+    archive_name = os.path.splitext(os.path.basename(archive_path))[0]
+    extracted_folder = os.path.join(extract_dir, archive_name)
+    
+    if os.path.exists(extracted_folder):
+        # Search for GDB in extracted folder
+        _, gdb_path, _ = find_gis_resources(extracted_folder)
+        if gdb_path:
+            return gdb_path
+        
+        # Also check for GIS subfolder
+        gis_folder = os.path.join(extracted_folder, 'GIS')
+        if os.path.exists(gis_folder):
+            _, gdb_path, _ = find_gis_resources(gis_folder)
+            if gdb_path:
+                return gdb_path
+    
+    return None
+
+
 def get_source_directory_name(folder_path: str, folder_prefix: str) -> str:
     """
     Extract the source directory name (up to and including the folder starting with prefix)
@@ -300,3 +366,170 @@ def get_source_directory_name(folder_path: str, folder_prefix: str) -> str:
     # If no match found, return the folder path itself
     logger.warning(f"No folder with prefix '{folder_prefix}' found in path: {folder_path}")
     return folder_path
+
+
+def get_extraction_user(archive_path: str) -> str:
+    """
+    Get the user who extracted the archive (current user)
+    
+    Args:
+        archive_path: Path to archive file
+        
+    Returns:
+        Username
+    """
+    try:
+        from config import CURRENT_USER
+        return CURRENT_USER
+    except ImportError:
+        return os.getenv('USERNAME', 'unknown')
+
+
+def check_if_directory_already_processed(source_dir: str) -> bool:
+    """
+    Check if a directory has already been processed by checking extracted_here_files.txt
+    
+    Args:
+        source_dir: Source directory to check
+        
+    Returns:
+        True if already processed, False otherwise
+    """
+    try:
+        tracker_file = get_extraction_tracker_file()
+        
+        if not os.path.exists(tracker_file):
+            return False
+        
+        # Normalize the source directory path
+        source_dir_normalized = os.path.normpath(source_dir).lower()
+        
+        with open(tracker_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if this line's directory matches our source directory
+                line_dir = os.path.dirname(os.path.normpath(line)).lower()
+                if line_dir == source_dir_normalized:
+                    logger.info(f"Directory already processed (found in tracker): {source_dir}")
+                    return True
+        
+        return False
+        
+    except Exception as e:
+        logger.warning(f"Could not check tracker file: {e}")
+        return False
+
+
+def copy_gdb_files_only(source_dir: str) -> int:
+    """
+    Copy only .gdb directories from source directory to extracted_files directory
+    
+    Args:
+        source_dir: Source directory to copy from
+        
+    Returns:
+        Number of GDB directories copied
+    """
+    try:
+        extract_dir = get_extracted_files_dir()
+        
+        logger.info(f"Copying only GDB files from {source_dir} to {extract_dir}")
+        
+        copied_count = 0
+        for item in os.listdir(source_dir):
+            source_path = os.path.join(source_dir, item)
+            
+            # Only copy .gdb directories
+            if os.path.isdir(source_path) and item.lower().endswith('.gdb'):
+                dest_path = os.path.join(extract_dir, item)
+                
+                # Skip if already exists in destination
+                if os.path.exists(dest_path):
+                    logger.debug(f"Skipping {item}, already exists in extraction directory")
+                    continue
+                
+                try:
+                    shutil.copytree(source_path, dest_path)
+                    logger.info(f"Copied GDB: {item}")
+                    copied_count += 1
+                except Exception as e:
+                    logger.warning(f"Could not copy {item}: {e}")
+        
+        logger.info(f"Copied {copied_count} GDB file(s) to extraction directory")
+        return copied_count
+        
+    except Exception as e:
+        logger.error(f"Error copying GDB files: {e}")
+        return 0
+
+
+def cleanup_extracted_files_dir() -> None:
+    """
+    Clean up extracted files directory by removing all non-GDB files and folders
+    Only keeps .gdb folders and their contents
+    """
+    try:
+        extract_dir = get_extracted_files_dir()
+        
+        if not os.path.exists(extract_dir):
+            logger.debug("Extraction directory doesn't exist, nothing to clean")
+            return
+        
+        logger.info(f"Cleaning up extraction directory: {extract_dir}")
+        
+        removed_count = 0
+        for item in os.listdir(extract_dir):
+            item_path = os.path.join(extract_dir, item)
+            
+            # Skip .gdb folders and .gitkeep files
+            if (os.path.isdir(item_path) and item.lower().endswith('.gdb')) or (item.lower().endswith('.gitkeep')):
+                logger.debug(f"Keeping GDB folder: {item}")
+                continue
+            
+            # Remove everything else
+            try:
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                    logger.debug(f"Removed directory: {item}")
+                else:
+                    os.remove(item_path)
+                    logger.debug(f"Removed file: {item}")
+                removed_count += 1
+            except Exception as e:
+                logger.warning(f"Could not remove {item}: {e}")
+        
+        logger.info(f"Cleanup complete. Removed {removed_count} items from extraction directory")
+        
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
+
+
+def find_all_gdbs_in_extracted_dir() -> List[str]:
+    """
+    Find all GDB files in the extracted_files directory
+    
+    Returns:
+        List of GDB paths
+    """
+    try:
+        extract_dir = get_extracted_files_dir()
+        gdb_paths = []
+        
+        if not os.path.exists(extract_dir):
+            return gdb_paths
+        
+        for item in os.listdir(extract_dir):
+            item_path = os.path.join(extract_dir, item)
+            if os.path.isdir(item_path) and item.lower().endswith('.gdb'):
+                gdb_paths.append(item_path)
+                logger.debug(f"Found GDB: {item_path}")
+        
+        logger.info(f"Found {len(gdb_paths)} GDB file(s) in extraction directory")
+        return gdb_paths
+        
+    except Exception as e:
+        logger.error(f"Error finding GDBs: {e}")
+        return []

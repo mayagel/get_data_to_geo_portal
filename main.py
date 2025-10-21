@@ -7,6 +7,9 @@ import sys
 from typing import Optional
 from datetime import datetime
 
+# Import ArcPy
+import arcpy
+
 # Import local modules
 from config import SDE_CONNECTION, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME
 from logger_setup import setup_logger
@@ -18,13 +21,29 @@ from database import (
     check_data_already_imported,
     create_table_from_gdb_fields,
     get_next_batch_id,
-    import_features_to_table
+    import_features_to_table,
+    # New versioned functions
+    normalize_geom_type_for_table,
+    get_column_set_from_fields,
+    get_or_create_version,
+    get_ingestion_id_for_gdb,
+    create_versioned_table_from_gdb_fields,
+    import_features_to_versioned_table,
+    update_excavationcenter_header,
+    debug_table_existence
 )
 from file_scanner import (
     scan_root_directory,
     find_gis_resources,
     extract_archive,
-    get_source_directory_name
+    get_source_directory_name,
+    get_extracted_gdb_path,
+    get_extraction_user,
+    cleanup_extracted_files_dir,
+    find_all_gdbs_in_extracted_dir,
+    get_extracted_files_dir,
+    check_if_directory_already_processed,
+    copy_gdb_files_only
 )
 from gdb_handler import (
     open_fgdb,
@@ -49,7 +68,7 @@ def process_gdb(
     batch_id: int
 ) -> bool:
     """
-    Process a File Geodatabase
+    Process a File Geodatabase using new versioned table structure
     
     Args:
         gdb_path: Path to .gdb folder
@@ -62,20 +81,28 @@ def process_gdb(
     """
     logger.info(f"Processing GDB: {gdb_path}")
     
+    # Get ingestion ID for this GDB
+    ingestion_id = get_ingestion_id_for_gdb(gdb_path)
+    logger.info(f"Using ingestion ID: {ingestion_id} for GDB: {gdb_path}")
+    
+    # Get user info
+    try:
+        from config import CURRENT_USER
+        current_user = CURRENT_USER
+    except:
+        current_user = get_extraction_user(gdb_path)
+    
     # Extract FGDB name
     fgdb_name = os.path.basename(gdb_path)
-    
-    # Extract source directory name (the A-xxxx folder name)
-    source_dir_name = os.path.basename(source_directory)
-    
-    # Extract GDB name without .gdb extension
-    gdb_name_without_ext = os.path.splitext(fgdb_name)[0]
     
     # Open/validate the GDB
     validated_gdb = open_fgdb(gdb_path)
     if validated_gdb is None:
         logger.error(f"Failed to open GDB: {gdb_path}")
         return False
+    
+    # Track layer statistics for summary table
+    layer_stats = {}  # {geom_type: {'version': 'verA', 'count': 10}}
     
     try:
         # Get all layers
@@ -95,125 +122,83 @@ def process_gdb(
                 logger.error(f"Failed to get layer info: {layer_name}")
                 continue
             
-            # Collect schema information for analysis
-            geom_type = normalize_geometry_type(layer_info['geometry_type']) or 'table'
-            column_names = set(
-                field['name'].lower() for field in layer_info['fields']
-                if field['name'].lower() not in ['objectid', 'oid', 'shape', 'geometry', 'shape_length', 'shape_area']
+            # Get normalized geometry type for table naming
+            geom_type_arcpy = normalize_geometry_type(layer_info['geometry_type'])
+            geom_type_norm = normalize_geom_type_for_table(geom_type_arcpy or 'POLYGON')
+            
+            # Get column set from fields
+            column_set = get_column_set_from_fields(layer_info['fields'])
+            
+            # Get or create version for this geometry + column combination
+            version = get_or_create_version(geom_type_norm, column_set, sde_connection, gdb_path, source_directory)
+            
+            # Build table name: excavationcenter_header_rows_{geom}_{ver}
+            table_name = f"excavationcenter_header_rows_{geom_type_norm}_{version}"
+            
+            logger.info(f"Layer '{layer_name}' -> Table '{table_name}' (ingestion_id: {ingestion_id})")
+            
+            # Always try to create new table (will handle "already exists" error)
+            logger.info(f"Creating or using existing table: {table_name}")
+            
+            # Get spatial reference from layer
+            import arcpy
+            arcpy.env.workspace = gdb_path
+            desc = arcpy.Describe(layer_name)
+            spatial_ref = desc.spatialReference if hasattr(desc, 'spatialReference') else None
+            
+            # Create table (function will handle "already exists" gracefully)
+            success = create_versioned_table_from_gdb_fields(
+                sde_connection=sde_connection,
+                table_name=table_name,
+                gdb_fields=layer_info['fields'],
+                geometry_type=geom_type_arcpy,
+                spatial_reference=spatial_ref,
+                creation_user=current_user
             )
-            schema_key = (fgdb_name, layer_name, geom_type)
-            LAYER_SCHEMAS[schema_key] = column_names
             
-            # Create table name: <source_dir>_<gdb_name>_<layer_name>
-            # Normalize each part (lowercase, replace special chars with underscores)
-            source_part = source_dir_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
-            gdb_part = gdb_name_without_ext.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
-            layer_part = layer_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
-            table_name = f"{source_part}_{gdb_part}_{layer_part}"
+            if not success:
+                logger.error(f"Failed to create/access table '{table_name}'")
+                continue
             
-            # Check if table exists
-            if table_exists(sde_connection, table_name):
-                logger.info(f"Table '{table_name}' already exists")
+            # Import data to table
+            success, feature_count = import_features_to_versioned_table(
+                sde_connection=sde_connection,
+                source_gdb_path=gdb_path,
+                source_layer_name=layer_name,
+                target_table_name=table_name,
+                ingestion_id=ingestion_id,
+                creation_user=current_user,
+                is_new_table=True  # Always treat as new since we just created/verified it
+            )
+            
+            if success:
+                logger.info(f"Successfully imported {feature_count} features to '{table_name}'")
                 
-                # Check if data already imported
-                if check_data_already_imported(sde_connection, table_name, source_directory, fgdb_name):
-                    logger.info(f"Data from '{source_directory}' / '{fgdb_name}' already imported to '{table_name}'. Skipping.")
-                    continue
-                
-                # Get normalized geometry type from layer
-                layer_geom_type = normalize_geometry_type(layer_info['geometry_type'])
-                
-                # Get table geometry type
-                table_geom_type = get_table_geometry_type(sde_connection, table_name)
-                
-                # Check if geometry types match
-                if table_geom_type and layer_geom_type:
-                    if table_geom_type.upper() != layer_geom_type.upper():
-                        logger.warning(
-                            f"Geometry type mismatch for table '{table_name}'. "
-                            f"Table has '{table_geom_type}', layer has '{layer_geom_type}'. Skipping layer."
-                        )
-                        continue
-                
-                # Check if fields match
-                table_columns = get_table_columns(sde_connection, table_name)
-                fields_match, layer_exclusive, table_exclusive = compare_layer_fields_with_table(
-                    layer_info['fields'], 
-                    table_columns,
-                    fgdb_name,
-                    source_directory
-                )
-                
-                if not fields_match:
-                    logger.warning(f"Schema mismatch for table '{table_name}'. Skipping layer.")
-                    continue
-                
-                logger.info(f"Table '{table_name}' exists with matching schema. Importing data...")
-                
-                # Import data
-                success = import_features_to_table(
-                    sde_connection=sde_connection,
-                    source_gdb_path=gdb_path,
-                    source_layer_name=layer_name,
-                    target_table_name=table_name,
-                    source_directory=source_directory,
-                    fgdb_name=fgdb_name,
-                    batch_id=batch_id
-                )
-                
-                if success:
-                    logger.info(f"Successfully imported data to '{table_name}'")
-                else:
-                    logger.error(f"Failed to import data to '{table_name}'")
-                
+                # Update layer statistics
+                if geom_type_norm not in layer_stats:
+                    layer_stats[geom_type_norm] = {'version': version, 'count': 0}
+                layer_stats[geom_type_norm]['count'] += feature_count
             else:
-                # Create new table
-                logger.info(f"Creating new table: {table_name}")
-                
-                # Get normalized geometry type
-                geom_type = normalize_geometry_type(layer_info['geometry_type'])
-                
-                # Get spatial reference from layer
-                import arcpy
-                arcpy.env.workspace = gdb_path
-                desc = arcpy.Describe(layer_name)
-                spatial_ref = desc.spatialReference if hasattr(desc, 'spatialReference') else None
-                
-                # Create table
-                success = create_table_from_gdb_fields(
-                    sde_connection=sde_connection,
-                    table_name=table_name,
-                    gdb_fields=layer_info['fields'],
-                    geometry_type=geom_type,
-                    spatial_reference=spatial_ref
-                )
-                
-                if success:
-                    logger.info(f"Successfully created table '{table_name}'. Importing data...")
-                    
-                    # Import data
-                    import_success = import_features_to_table(
-                        sde_connection=sde_connection,
-                        source_gdb_path=gdb_path,
-                        source_layer_name=layer_name,
-                        target_table_name=table_name,
-                        source_directory=source_directory,
-                        fgdb_name=fgdb_name,
-                        batch_id=batch_id
-                    )
-                    
-                    if import_success:
-                        logger.info(f"Successfully imported data to '{table_name}'")
-                    else:
-                        logger.error(f"Failed to import data to '{table_name}'")
-                else:
-                    logger.error(f"Failed to create table '{table_name}'")
-                    continue
+                logger.error(f"Failed to import data to '{table_name}'")
+        
+        # Update summary table
+        if layer_stats:
+            logger.info(f"Updating excavationcenter_header for ingestion_id {ingestion_id}")
+            update_excavationcenter_header(
+                sde_connection=sde_connection,
+                ingestion_id=ingestion_id,
+                gdb_path=gdb_path,
+                source_directory=source_directory,
+                layer_stats=layer_stats,
+                creation_user=current_user
+            )
         
         return True
         
     except Exception as e:
         logger.error(f"Error processing GDB '{gdb_path}': {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 
@@ -247,27 +232,54 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
         if compressed_files_in_gis:
             compressed_files = compressed_files_in_gis
     
-    # Extract compressed files if found
-    if compressed_files:
-        logger.info(f"Found {len(compressed_files)} compressed file(s)")
-        for archive_path in compressed_files:
-            success = extract_archive(archive_path)
-            
-            # After successful extraction, search again for GDB
-            if success:
-                extract_dir = os.path.dirname(archive_path)
-                _, new_gdb_path, _ = find_gis_resources(extract_dir)
-                if new_gdb_path:
-                    gdb_path = new_gdb_path
-            else:
-                logger.warning(f"Skipping archive '{archive_path}' - extraction failed. Continuing with other files.")
+    # Check if this directory has already been processed
+    check_folder = gis_folder if gis_folder else folder_path
+    if check_if_directory_already_processed(check_folder):
+        logger.info(f"Directory already processed, skipping: {check_folder}")
+        return True
     
-    # Process GDB if found
-    if gdb_path:
-        logger.info(f"Found GDB: {gdb_path}")
-        return process_gdb(gdb_path, source_directory, sde_connection, batch_id)
+    # If we have GIS resources (GDB or compressed files), process them
+    if gis_folder or gdb_path or compressed_files:
+        # Copy only GDB files to extraction directory (not everything)
+        logger.info("Copying GDB files to extraction directory...")
+        copy_gdb_files_only(check_folder)
+        
+        # Extract compressed files if found
+        if compressed_files:
+            logger.info(f"Found {len(compressed_files)} compressed file(s) - extracting...")
+            for archive_path in compressed_files:
+                # Extract directly to extracted_files directory
+                extract_archive(archive_path)
+        
+        # Clean up - remove all non-GDB files
+        logger.info("Cleaning up non-GDB files from extraction directory...")
+        cleanup_extracted_files_dir()
+        
+        # Find all GDB files in extraction directory
+        gdb_paths = find_all_gdbs_in_extracted_dir()
+        
+        if not gdb_paths:
+            logger.warning(f"No GDB files found after extraction in {folder_path}")
+            return False
+        
+        # Process all GDB files found
+        success_count = 0
+        for gdb_path in gdb_paths:
+            logger.info(f"Processing GDB: {gdb_path}")
+            if process_gdb(gdb_path, source_directory, sde_connection, batch_id):
+                success_count += 1
+                logger.info(f"Successfully processed GDB: {gdb_path}")
+            else:
+                logger.error(f"Failed to process GDB: {gdb_path}")
+        
+        # Final cleanup after processing all GDBs from this folder
+        logger.info("Final cleanup of extraction directory...")
+        cleanup_extracted_files_dir()
+        
+        return success_count > 0
+    
     else:
-        logger.info(f"No GDB found in folder: {folder_path}")
+        logger.info(f"No GIS resources found in folder: {folder_path}")
         return False
 
 
@@ -374,6 +386,10 @@ def main():
             except Exception as e:
                 logger.error(f"Error processing folder '{folder_path}': {e}")
                 continue
+        
+        # Final cleanup of extraction directory (in case any files remain)
+        logger.info("Final cleanup of extraction directory...")
+        cleanup_extracted_files_dir()
         
         logger.info("=" * 80)
         logger.info(f"Processing complete. Successfully processed {success_count}/{len(matching_folders)} folders")
