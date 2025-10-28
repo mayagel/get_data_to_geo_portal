@@ -3,7 +3,7 @@
 ## Project Overview
 
 ### Objective
-Import all GDB (File Geodatabase) files from the archaeological excavations archive at `\\iaahq\Archaeological_Documentation\Center\Excavations` into our PostgreSQL/PostGIS database for centralized access via the geographic portal.
+Import all GDB (File Geodatabase) files from the archaeological excavations archive at `\\iaahq\Archaeological_Documentation\North\Excavations` into our PostgreSQL/PostGIS database for centralized access via the geographic portal.
 
 ### Challenge
 The archive contains 452 directories with prefix "A-" (excavation sites), each containing various file types including GIS data, images, documents, and compressed archives. Manual import would be impractical and error-prone.
@@ -47,7 +47,7 @@ The program filters directories through multiple stages:
 
 **Database Tables Created:**
 
-1. **`Center_Excavations_header`** - Summary table with one row per GDB file
+1. **`North_Excavations_header`** - Summary table with one row per GDB file
    - `ingestion_id` - Unique identifier for each GDB
    - `f_name` - GDB filename
    - `s_dir` - Full source directory path  
@@ -57,8 +57,8 @@ The program filters directories through multiple stages:
    - `from_compressed` - Flag (1 if from archive, 0 if direct)
    - `creation_date`, `update_date`, `creation_user`, `update_user` - Audit fields
 
-2. **`Center_Excavations_header_rows_{geometry}_{version}`** - Data tables
-   - Format: `Center_Excavations_header_rows_poly_verA`
+2. **`North_Excavations_header_rows_{geometry}_{version}`** - Data tables
+   - Format: `North_Excavations_header_rows_poly_verA`
    - Separate tables for each geometry type (poly/line/point) and schema version
    - Contains all original GDB fields plus metadata:
      - `creation_date`, `update_date`

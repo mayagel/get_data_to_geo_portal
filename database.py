@@ -6,6 +6,7 @@ import arcpy
 from typing import List, Dict, Optional, Tuple, Set
 from datetime import datetime
 import logging
+from config import REGION_NAME, region_MAPPING
 
 logger = logging.getLogger("GISIngestion.database")
 
@@ -231,14 +232,14 @@ def load_existing_versions_from_db(sde_connection: str) -> None:
     try:
         arcpy.env.workspace = sde_connection
         
-        # List all tables starting with Center_Excavations_header_rows_
-        all_tables = arcpy.ListTables("Center_Excavations_header_rows_*")
-        all_fcs = arcpy.ListFeatureClasses("Center_Excavations_header_rows_*")
+        # List all tables starting with region_Excavations_header_rows_
+        all_tables = arcpy.ListTables("{REGION_NAME}_Excavations_header_rows_*")
+        all_fcs = arcpy.ListFeatureClasses("{REGION_NAME}_Excavations_header_rows_*")
         
         tables = (all_tables or []) + (all_fcs or [])
         
         for table_name in tables:
-            # Parse table name: Center_Excavations_header_rows_{geom}_{ver}
+            # Parse table name: region_Excavations_header_rows_{geom}_{ver}
             parts = table_name.split('_')
             if len(parts) >= 6:
                 geom_type = parts[4]  # poly/line/point
@@ -274,7 +275,7 @@ def load_existing_versions_from_db(sde_connection: str) -> None:
 def initialize_ingestion_id_from_db(sde_connection: str) -> None:
     """
     Initialize the global ingestion ID counter from the database
-    Gets the maximum ingestion_id from Center_Excavations_header and continues from there
+    Gets the maximum ingestion_id from all_reion_Excavations_header and continues from there
     
     Args:
         sde_connection: SDE connection path
@@ -283,12 +284,12 @@ def initialize_ingestion_id_from_db(sde_connection: str) -> None:
     
     try:
         # Ensure the table exists first
-        if not ensure_Center_Excavations_header_table(sde_connection):
-            logger.warning("Could not ensure Center_Excavations_header table exists, starting from ID 1")
+        if not ensure_REGION_NAME_Excavations_header_table(sde_connection):
+            logger.warning("Could not ensure {REGION_NAME}_Excavations_header table exists, starting from ID 1")
             return
         
         arcpy.env.workspace = sde_connection
-        table_name = "Center_Excavations_header"
+        table_name = "All_regions_Excavations_header"
         table_path = f"{sde_connection}\\{table_name}"
         
         # Get maximum ingestion_id from the table
@@ -352,7 +353,7 @@ def create_versioned_table_from_gdb_fields(
     
     Args:
         sde_connection: SDE connection path
-        table_name: Name of the table to create (e.g., Center_Excavations_header_rows_poly_verA)
+        table_name: Name of the table to create (e.g., REGION_NAME_Excavations_header_rows_poly_verA)
         gdb_fields: List of field definitions from GDB
         geometry_type: Geometry type (Point, Polyline, Polygon, etc.)
         spatial_reference: Spatial reference object
@@ -635,9 +636,9 @@ def import_features_to_versioned_table(
 
 
 
-def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
+def ensure_REGION_NAME_Excavations_header_table(sde_connection: str) -> bool:
     """
-    Ensure the Center_Excavations_header summary table exists
+    Ensure the all_regions_Excavations_header summary table exists
     
     Table structure:
     - Oid (auto)
@@ -656,6 +657,7 @@ def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
     - s_dir (source directory)
     - main_folder_name (name of the source directory, e.g., A-8569_Darchmon_20191030)
     - from_compressed (1 if GDB came from compressed file, 0 otherwise)
+    - region (the region of the gdb)
     
     Args:
         sde_connection: SDE connection path
@@ -665,7 +667,7 @@ def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
     """
     try:
         arcpy.env.workspace = sde_connection
-        table_name = "Center_Excavations_header"
+        table_name = "All_regions_Excavations_header"
         table_path = f"{sde_connection}\\{table_name}"
         
         if arcpy.Exists(table_path):
@@ -691,6 +693,8 @@ def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
         arcpy.AddField_management(table_path, "s_dir", "TEXT", field_length=500)
         arcpy.AddField_management(table_path, "main_folder_name", "TEXT", field_length=255)
         arcpy.AddField_management(table_path, "from_compressed", "SHORT")
+        arcpy.AddField_management(table_path, "region", "SHORT")
+
         
         logger.info(f"Successfully created summary table '{table_name}' with all fields")
         return True
@@ -700,7 +704,7 @@ def ensure_Center_Excavations_header_table(sde_connection: str) -> bool:
         return False
 
 
-def update_Center_Excavations_header(
+def update_REGION_NAME_Excavations_header(
     sde_connection: str,
     ingestion_id: int,
     gdb_path: str,
@@ -710,7 +714,7 @@ def update_Center_Excavations_header(
     from_compressed: bool = False
 ) -> bool:
     """
-    Update or insert a row in the Center_Excavations_header summary table
+    Update or insert a row in the All_regions_Excavations_header summary table
     
     Args:
         sde_connection: SDE connection path
@@ -729,11 +733,11 @@ def update_Center_Excavations_header(
         import os
         
         # Ensure table exists
-        if not ensure_Center_Excavations_header_table(sde_connection):
+        if not ensure_REGION_NAME_Excavations_header_table(sde_connection):
             return False
         
         arcpy.env.workspace = sde_connection
-        table_name = "Center_Excavations_header"
+        table_name = "All_regions_Excavations_header"
         table_path = f"{sde_connection}\\{table_name}"
         
         # Extract GDB file name
@@ -764,24 +768,24 @@ def update_Center_Excavations_header(
         if existing_count > 0:
             # Update existing record
             update_fields = ['update_date', 'update_user', 'poly_ver', 'line_ver', 'point_ver',
-                           'poly_count', 'line_count', 'point_count', 'from_compressed']
+                           'poly_count', 'line_count', 'point_count', 'from_compressed', 'region']
             
             with arcpy.da.UpdateCursor(table_path, update_fields, where_clause=where_clause) as cursor:
                 for row in cursor:
                     cursor.updateRow([current_time, creation_user, poly_ver, line_ver, point_ver,
-                                     poly_count, line_count, point_count, from_compressed_value])
+                                     poly_count, line_count, point_count, from_compressed_value, region_MAPPING[REGION_NAME]])
             
             logger.info(f"Updated summary record for ingestion_id {ingestion_id}")
         else:
             # Insert new record
             insert_fields = ['creation_date', 'update_date', 'creation_user', 'update_user',
                            'poly_ver', 'line_ver', 'point_ver', 'ingestion_id',
-                           'poly_count', 'line_count', 'point_count', 'f_name', 's_dir', 'main_folder_name', 'from_compressed']
+                           'poly_count', 'line_count', 'point_count', 'f_name', 's_dir', 'main_folder_name', 'from_compressed', 'region']
             
             with arcpy.da.InsertCursor(table_path, insert_fields) as cursor:
                 cursor.insertRow([current_time, current_time, creation_user, creation_user,
                                  poly_ver, line_ver, point_ver, ingestion_id,
-                                 poly_count, line_count, point_count, gdb_filename, source_directory, main_folder_name, from_compressed_value])
+                                 poly_count, line_count, point_count, gdb_filename, source_directory, main_folder_name, from_compressed_value,  region_MAPPING[REGION_NAME]])
             
             logger.info(f"Inserted new summary record for ingestion_id {ingestion_id}")
         

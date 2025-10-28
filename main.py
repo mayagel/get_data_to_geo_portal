@@ -12,7 +12,7 @@ import shutil
 import arcpy
 
 # Import local modules
-from config import SDE_CONNECTION, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME
+from config import SDE_CONNECTION, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME, REGION_NAME
 from logger_setup import setup_logger
 from database import (
     connect_to_gis,
@@ -23,7 +23,7 @@ from database import (
     get_ingestion_id_for_gdb,
     create_versioned_table_from_gdb_fields,
     import_features_to_versioned_table,
-    update_Center_Excavations_header,
+    update_REGION_NAME_Excavations_header,
     initialize_ingestion_id_from_db
 )
 from file_scanner import (
@@ -146,8 +146,8 @@ def process_gdb(
             # Get or create version for this geometry + column combination
             version = get_or_create_version(geom_type_norm, column_set, sde_connection, gdb_path, source_directory)
             
-            # Build table name: Center_Excavations_header_rows_{geom}_{ver}
-            table_name = f"Center_Excavations_header_rows_{geom_type_norm}_{version}"
+            # Build table name: REGION_NAME_Excavations_header_rows_{geom}_{ver}
+            table_name = f"{REGION_NAME}_Excavations_header_rows_{geom_type_norm}_{version}"
             
             logger.info(f"Layer '{layer_name}' -> Table '{table_name}' (ingestion_id: {ingestion_id})")
             
@@ -193,8 +193,8 @@ def process_gdb(
         
         # Update summary table
         if layer_stats:
-            logger.info(f"Updating Center_Excavations_header for ingestion_id {ingestion_id}")
-            update_Center_Excavations_header(
+            logger.info(f"Updating {REGION_NAME}_Excavations_header for ingestion_id {ingestion_id}")
+            update_REGION_NAME_Excavations_header(
                 sde_connection=sde_connection,
                 ingestion_id=ingestion_id,
                 gdb_path=gdb_path,
