@@ -12,7 +12,7 @@ import shutil
 import arcpy
 
 # Import local modules
-from config import SDE_CONNECTION, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME, REGION_NAME
+from config import SDE_CONNECTION, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME, REGION_NAME, region_MAPPING
 from logger_setup import setup_logger
 from database import (
     connect_to_gis,
@@ -23,9 +23,9 @@ from database import (
     get_ingestion_id_for_gdb,
     create_versioned_table_from_gdb_fields,
     import_features_to_versioned_table,
-    update_REGION_NAME_Excavations_header,
+    update_All_regions_Excavations_header,
     initialize_ingestion_id_from_db
-)
+    )
 from file_scanner import (
     scan_root_directory,
     find_gis_resources,
@@ -146,8 +146,8 @@ def process_gdb(
             # Get or create version for this geometry + column combination
             version = get_or_create_version(geom_type_norm, column_set, sde_connection, gdb_path, source_directory)
             
-            # Build table name: REGION_NAME_Excavations_header_rows_{geom}_{ver}
-            table_name = f"{REGION_NAME}_Excavations_header_rows_{geom_type_norm}_{version}"
+            # Build table name: All_Excavations_header_rows_{geom}_{ver}
+            table_name = f"All_Excavations_header_rows_{geom_type_norm}_{version}"
             
             logger.info(f"Layer '{layer_name}' -> Table '{table_name}' (ingestion_id: {ingestion_id})")
             
@@ -162,8 +162,7 @@ def process_gdb(
                 table_name=table_name,
                 gdb_fields=layer_info['fields'],
                 geometry_type=geom_type_arcpy,
-                spatial_reference=spatial_ref,
-                creation_user=current_user
+                spatial_reference=spatial_ref
             )
             
             if not success:
@@ -178,6 +177,7 @@ def process_gdb(
                 target_table_name=table_name,
                 ingestion_id=ingestion_id,
                 creation_user=current_user,
+                region=region_MAPPING[REGION_NAME],
                 is_new_table=True  # Always treat as new since we just created/verified it
             )
             
@@ -193,15 +193,16 @@ def process_gdb(
         
         # Update summary table
         if layer_stats:
-            logger.info(f"Updating {REGION_NAME}_Excavations_header for ingestion_id {ingestion_id}")
-            update_REGION_NAME_Excavations_header(
+            logger.info(f"Updating All_regions_Excavations_header for ingestion_id {ingestion_id} in the region {REGION_NAME}")
+            update_All_regions_Excavations_header(
                 sde_connection=sde_connection,
                 ingestion_id=ingestion_id,
                 gdb_path=gdb_path,
                 source_directory=source_directory,
                 layer_stats=layer_stats,
                 creation_user=current_user,
-                from_compressed=from_compressed
+                from_compressed=from_compressed,
+                region=region_MAPPING[REGION_NAME]
             )
         
         return True

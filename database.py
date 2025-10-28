@@ -6,13 +6,12 @@ import arcpy
 from typing import List, Dict, Optional, Tuple, Set
 from datetime import datetime
 import logging
-from config import REGION_NAME, region_MAPPING
 
 logger = logging.getLogger("GISIngestion.database")
 
 # Global tracking for versions and ingestion IDs
-VERSION_TRACKER = {}  # {(geom_type, frozenset(columns)): version_id}
-NEXT_VERSION_IDS = {'poly': 'A', 'line': 'A', 'point': 'A'}  # Track next version letter per geometry type
+VERSION_TRACKER = {}  # {frozenset(columns): version_id} - versions based on columns only, shared across geometry types
+NEXT_VERSION_LETTER = 'A'  # Track next version letter globally (not per geometry type)
 CURRENT_INGESTION_ID = 1  # Global ingestion ID counter
 GDB_INGESTION_IDS = {}  # {gdb_path: ingestion_id} to track same ID for layers from same GDB
 
@@ -167,12 +166,13 @@ def get_or_create_version(
     source_directory: str = None
 ) -> str:
     """
-    Get existing version ID or create new one for a geometry type + column combination
+    Get existing version ID or create new one based on column combination only
+    Versions are shared across geometry types (poly/line/point) when columns match
     
     Args:
-        geom_type_norm: Normalized geometry type ('poly', 'line', 'point')
+        geom_type_norm: Normalized geometry type ('poly', 'line', 'point') - used only for file output
         column_set: Frozen set of column names
-        sde_connection: SDE connection path
+        sde_connection: SDE connection path (not used anymore, kept for compatibility)
         gdb_path: Path to GDB file (optional, for logging)
         source_directory: Source directory path (optional, for logging)
         
@@ -180,31 +180,35 @@ def get_or_create_version(
         Version ID (e.g., 'verA', 'verB', 'verC')
     """
     import os
-    global VERSION_TRACKER, NEXT_VERSION_IDS
+    global VERSION_TRACKER, NEXT_VERSION_LETTER
     
-    key = (geom_type_norm, column_set)
+    # Normalize column_set to lowercase for comparison
+    normalized_column_set = frozenset(col.lower() if isinstance(col, str) else col for col in column_set)
     
-    # Check if we already have this version
-    if key in VERSION_TRACKER:
-        return VERSION_TRACKER[key]
+    # Check if we already have this version (based on columns only)
+    if normalized_column_set in VERSION_TRACKER:
+        version_id = VERSION_TRACKER[normalized_column_set]
+        logger.debug(f"Found existing version {version_id} for columns: {sorted(normalized_column_set)}")
+        return version_id
     
-    # Load existing versions from database if this is first time
+    # Load existing versions from version file if this is first time
     if not VERSION_TRACKER:
-        load_existing_versions_from_db(sde_connection)
+        load_existing_versions_from_version_file()
         # Check again after loading
-        if key in VERSION_TRACKER:
-            return VERSION_TRACKER[key]
+        if normalized_column_set in VERSION_TRACKER:
+            version_id = VERSION_TRACKER[normalized_column_set]
+            logger.debug(f"Found existing version {version_id} after loading from file")
+            return version_id
     
-    # Create new version
-    next_letter = NEXT_VERSION_IDS[geom_type_norm]
-    version_id = f'ver{next_letter}'
-    VERSION_TRACKER[key] = version_id
+    # Create new version (shared across all geometry types)
+    version_id = f'ver{NEXT_VERSION_LETTER}'
+    VERSION_TRACKER[normalized_column_set] = version_id
     
-    # Increment version letter (A->B->...->Z->AA->AB->...->AZ)
-    NEXT_VERSION_IDS[geom_type_norm] = _increment_version(next_letter)
+    # Increment version letter globally (A->B->...->Z->AA->AB->...->AZ)
+    NEXT_VERSION_LETTER = _increment_version(NEXT_VERSION_LETTER)
     
     # Get info for logging
-    columns_list = sorted(column_set)
+    columns_list = sorted(normalized_column_set)
     columns_str = ', '.join(columns_list)
     
     # Log the new version discovery
@@ -212,7 +216,7 @@ def get_or_create_version(
         gdb_filename = os.path.basename(gdb_path)
         logger.info(f"{version_id} found with the columns [{columns_str}] in the gdb {gdb_filename} in the source {source_directory}.")
         
-        # Write to file
+        # Write to file (with geometry prefix for tracking, but version is shared)
         write_version_to_file(version_id, geom_type_norm, source_directory, gdb_filename, columns_list)
     else:
         logger.info(f"Created new version {version_id} for {geom_type_norm} with columns: {columns_str}")
@@ -220,62 +224,102 @@ def get_or_create_version(
     return version_id
 
 
-def load_existing_versions_from_db(sde_connection: str) -> None:
+def load_existing_versions_from_version_file(version_file_path: str = "layers_version.txt") -> None:
     """
-    Load existing version mappings from database tables
+    Load existing version mappings from layers_version.txt file
+    Versions are based on column combinations only (shared across geometry types)
+    
+    Format: {geom_type}_ver{x}: source_path, gdb_filename, [column1, column2, ...]
+    Example: poly_verA: \\path, file.gdb, [col1, col2]
     
     Args:
-        sde_connection: SDE connection path
+        version_file_path: Path to the version file (default: layers_version.txt)
     """
-    global VERSION_TRACKER, NEXT_VERSION_IDS
+    global VERSION_TRACKER, NEXT_VERSION_LETTER
+    import ast
+    import os
+    
+    if not os.path.exists(version_file_path):
+        logger.info(f"Version file '{version_file_path}' does not exist yet, starting fresh")
+        return
     
     try:
-        arcpy.env.workspace = sde_connection
+        max_version_letter = None  # Track the highest version letter we find
         
-        # List all tables starting with region_Excavations_header_rows_
-        all_tables = arcpy.ListTables("{REGION_NAME}_Excavations_header_rows_*")
-        all_fcs = arcpy.ListFeatureClasses("{REGION_NAME}_Excavations_header_rows_*")
+        with open(version_file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Parse line: {geom_type}_ver{x}: source_path, gdb_filename, [columns]
+                # Example: poly_verA: \\path, file.gdb, [col1, col2]
+                
+                # Find the colon that separates the version from the rest
+                colon_idx = line.find(':')
+                if colon_idx == -1:
+                    continue
+                
+                version_part = line[:colon_idx].strip()  # e.g., "poly_verA"
+                data_part = line[colon_idx + 1:].strip()  # e.g., "\\path, file.gdb, [col1, col2]"
+                
+                # Extract version (ignore geometry prefix: poly_, line_, point_)
+                if '_ver' in version_part:
+                    version = version_part.split('_ver')[1]  # e.g., "A"
+                    version_id = f'ver{version}'  # e.g., "verA"
+                else:
+                    continue
+                
+                # Extract columns from the data part
+                # Format: source_path, gdb_filename, [columns]
+                # Find the last comma followed by space and bracket pattern: ", [...]"
+                last_comma_bracket = data_part.rfind(', [')
+                if last_comma_bracket == -1:
+                    # Try without the comma-space pattern in case format differs slightly
+                    last_bracket = data_part.rfind('[')
+                    if last_bracket == -1:
+                        continue
+                    columns_str = data_part[last_bracket:]
+                else:
+                    columns_str = data_part[last_comma_bracket + 2:].strip()  # Skip ", " and get "[...]"
+                
+                try:
+                    # Parse the list of columns
+                    columns_list = ast.literal_eval(columns_str)
+                    if not isinstance(columns_list, list):
+                        continue
+                    
+                    # Create column set for lookup (normalize to lowercase)
+                    column_set = frozenset(col.lower() for col in columns_list)
+                    
+                    # Map column_set to version (overwrite if exists, all geometry types share same version)
+                    VERSION_TRACKER[column_set] = version_id
+                    
+                    # Track maximum version letter
+                    if max_version_letter is None:
+                        max_version_letter = version
+                    elif _compare_versions(version, max_version_letter) > 0:
+                        max_version_letter = version
+                        
+                except (ValueError, SyntaxError) as e:
+                    logger.warning(f"Could not parse columns from line: {line[:100]}, error: {e}")
+                    continue
         
-        tables = (all_tables or []) + (all_fcs or [])
+        # Set next version letter to increment from the maximum found
+        if max_version_letter:
+            NEXT_VERSION_LETTER = _increment_version(max_version_letter)
+        else:
+            NEXT_VERSION_LETTER = 'A'
         
-        for table_name in tables:
-            # Parse table name: region_Excavations_header_rows_{geom}_{ver}
-            parts = table_name.split('_')
-            if len(parts) >= 6:
-                geom_type = parts[4]  # poly/line/point
-                version = parts[5]  # verA/verB/etc
-                
-                # Get columns from this table
-                table_path = f"{sde_connection}\\{table_name}"
-                fields = arcpy.ListFields(table_path)
-                
-                column_set = set()
-                for field in fields:
-                    field_name = field.name.lower()
-                    # Exclude system and metadata fields
-                    if field_name not in ['objectid', 'oid', 'shape', 'geometry', 'fid', 
-                                          'creation_date', 'update_date', 'creation_user', 
-                                          'update_user', 'ingestion_id', 'shape_length', 'shape_area']:
-                        column_set.add(field_name)
-                
-                key = (geom_type, frozenset(column_set))
-                VERSION_TRACKER[key] = version
-                
-                # Update next version letter if needed
-                version_letter = version.replace('ver', '')
-                if _compare_versions(version_letter, NEXT_VERSION_IDS[geom_type]) >= 0:
-                    NEXT_VERSION_IDS[geom_type] = _increment_version(version_letter)
-        
-        logger.info(f"Loaded {len(VERSION_TRACKER)} existing versions from database")
+        logger.info(f"Loaded {len(VERSION_TRACKER)} existing versions from '{version_file_path}' (next version: {NEXT_VERSION_LETTER})")
         
     except Exception as e:
-        logger.warning(f"Could not load existing versions from database: {e}")
-
+        logger.warning(f"Could not load existing versions from file '{version_file_path}': {e}")
 
 def initialize_ingestion_id_from_db(sde_connection: str) -> None:
     """
     Initialize the global ingestion ID counter from the database
-    Gets the maximum ingestion_id from all_reion_Excavations_header and continues from there
+    Gets the maximum ingestion_id from All_regions_Excavations_header and continues from there
     
     Args:
         sde_connection: SDE connection path
@@ -284,8 +328,8 @@ def initialize_ingestion_id_from_db(sde_connection: str) -> None:
     
     try:
         # Ensure the table exists first
-        if not ensure_REGION_NAME_Excavations_header_table(sde_connection):
-            logger.warning("Could not ensure {REGION_NAME}_Excavations_header table exists, starting from ID 1")
+        if not ensure_All_regions_Excavations_header_table(sde_connection):
+            logger.warning("Could not ensure All_regions_Excavations_header table exists, starting from ID 1")
             return
         
         arcpy.env.workspace = sde_connection
@@ -346,18 +390,16 @@ def create_versioned_table_from_gdb_fields(
     gdb_fields: List[Dict],
     geometry_type: Optional[str] = None,
     spatial_reference: Optional[arcpy.SpatialReference] = None,
-    creation_user: str = 'unknown'
 ) -> bool:
     """
     Create a new feature class/table with versioned naming and new metadata fields
     
     Args:
         sde_connection: SDE connection path
-        table_name: Name of the table to create (e.g., REGION_NAME_Excavations_header_rows_poly_verA)
+        table_name: Name of the table to create (e.g., All_Excavations_header_rows_poly_verA)
         gdb_fields: List of field definitions from GDB
         geometry_type: Geometry type (Point, Polyline, Polygon, etc.)
         spatial_reference: Spatial reference object
-        creation_user: User creating the table
         
     Returns:
         True if successful, False otherwise
@@ -417,6 +459,8 @@ def create_versioned_table_from_gdb_fields(
         arcpy.AddField_management(output_fc, "update_date", "DATE")
         arcpy.AddField_management(output_fc, "creation_user", "TEXT", field_length=100)
         arcpy.AddField_management(output_fc, "update_user", "TEXT", field_length=100)
+        arcpy.AddField_management(output_fc, "region", "SHORT")
+
         
         # Add fields from GDB
         for field in gdb_fields:
@@ -532,6 +576,7 @@ def import_features_to_versioned_table(
     target_table_name: str,
     ingestion_id: int,
     creation_user: str = 'unknown',
+    region: int = 0,
     is_new_table: bool = False
 ) -> Tuple[bool, int]:
     """
@@ -544,6 +589,7 @@ def import_features_to_versioned_table(
         target_table_name: Name of target table
         ingestion_id: Ingestion ID for this import
         creation_user: User importing the data
+        region: (short)code that is domain for the region the gdb is in.
         is_new_table: Whether this is a new table (affects creation_date)
         
     Returns:
@@ -592,7 +638,7 @@ def import_features_to_versioned_table(
             write_fields.append('SHAPE@')
         
         # Add new metadata fields
-        write_fields.extend(['creation_date', 'update_date', 'creation_user', 'update_user', 'ingestion_id'])
+        write_fields.extend(['creation_date', 'update_date', 'creation_user', 'update_user', 'region', 'ingestion_id'])
         
         # Start editing session
         edit = arcpy.da.Editor(sde_connection)
@@ -612,7 +658,7 @@ def import_features_to_versioned_table(
                         # update_date: now
                         # creation_user and update_user: current user
                         # ingestion_id: from parameter
-                        new_row = list(row) + [current_time, current_time, creation_user, creation_user, ingestion_id]
+                        new_row = list(row) + [current_time, current_time, creation_user, creation_user, region, ingestion_id]
                         insert_cursor.insertRow(new_row)
                         inserted_count += 1
             
@@ -636,9 +682,9 @@ def import_features_to_versioned_table(
 
 
 
-def ensure_REGION_NAME_Excavations_header_table(sde_connection: str) -> bool:
+def ensure_All_regions_Excavations_header_table(sde_connection: str) -> bool:
     """
-    Ensure the all_regions_Excavations_header summary table exists
+    Ensure the All_regions_regions_Excavations_header summary table exists
     
     Table structure:
     - Oid (auto)
@@ -704,14 +750,15 @@ def ensure_REGION_NAME_Excavations_header_table(sde_connection: str) -> bool:
         return False
 
 
-def update_REGION_NAME_Excavations_header(
+def update_All_regions_Excavations_header(
     sde_connection: str,
     ingestion_id: int,
     gdb_path: str,
     source_directory: str,
     layer_stats: Dict[str, Dict],
     creation_user: str = 'unknown',
-    from_compressed: bool = False
+    from_compressed: bool = False,
+    region: int = 0
 ) -> bool:
     """
     Update or insert a row in the All_regions_Excavations_header summary table
@@ -725,6 +772,7 @@ def update_REGION_NAME_Excavations_header(
                      Format: {'poly': {'version': 'verA', 'count': 10}, 'line': {...}, 'point': {...}}
         creation_user: User creating/updating the record
         from_compressed: Whether the GDB came from a compressed file (True) or not (False)
+        region: (short)code that is domain for the region the gdb is in.
         
     Returns:
         True if successful
@@ -733,7 +781,7 @@ def update_REGION_NAME_Excavations_header(
         import os
         
         # Ensure table exists
-        if not ensure_REGION_NAME_Excavations_header_table(sde_connection):
+        if not ensure_All_regions_Excavations_header_table(sde_connection):
             return False
         
         arcpy.env.workspace = sde_connection
@@ -773,7 +821,7 @@ def update_REGION_NAME_Excavations_header(
             with arcpy.da.UpdateCursor(table_path, update_fields, where_clause=where_clause) as cursor:
                 for row in cursor:
                     cursor.updateRow([current_time, creation_user, poly_ver, line_ver, point_ver,
-                                     poly_count, line_count, point_count, from_compressed_value, region_MAPPING[REGION_NAME]])
+                                     poly_count, line_count, point_count, from_compressed_value, region])
             
             logger.info(f"Updated summary record for ingestion_id {ingestion_id}")
         else:
@@ -785,7 +833,7 @@ def update_REGION_NAME_Excavations_header(
             with arcpy.da.InsertCursor(table_path, insert_fields) as cursor:
                 cursor.insertRow([current_time, current_time, creation_user, creation_user,
                                  poly_ver, line_ver, point_ver, ingestion_id,
-                                 poly_count, line_count, point_count, gdb_filename, source_directory, main_folder_name, from_compressed_value,  region_MAPPING[REGION_NAME]])
+                                 poly_count, line_count, point_count, gdb_filename, source_directory, main_folder_name, from_compressed_value,  region])
             
             logger.info(f"Inserted new summary record for ingestion_id {ingestion_id}")
         
