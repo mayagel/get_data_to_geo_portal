@@ -47,7 +47,6 @@ from gdb_handler import (
 # Initialize logger
 logger = setup_logger()
 
-
 def clean_extracted_files():
     """Clean extracted_files directories - keep only .gdb directories"""
     extracted_files_dir = get_extracted_files_dir()
@@ -72,13 +71,13 @@ def clean_extracted_files():
             except:
                 pass
 
-
 def process_gdb(
     gdb_path: str,
     source_directory: str,
     sde_connection: str,
     batch_id: int,
-    from_compressed: bool = False
+    region: int = 101,
+    from_compressed: bool = False,
 ) -> bool:
     """
     Process a File Geodatabase using new versioned table structure
@@ -211,7 +210,6 @@ def process_gdb(
         logger.error(f"Error processing GDB '{gdb_path}': {e}")
         return False
 
-
 def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool:
     """
     Process a single folder (looking for GIS resources)
@@ -308,18 +306,18 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
         for gdb_path in all_gdb_paths:
             is_from_compressed = gdb_path in gdbs_from_compressed
             logger.info(f"Processing GDB: {gdb_path} (from_compressed: {is_from_compressed})")
-            if process_gdb(gdb_path, source_directory, sde_connection, batch_id, from_compressed=is_from_compressed):
-                success_count += 1
-                logger.info(f"Successfully processed GDB: {gdb_path}")
-            else:
-                logger.error(f"Failed to process GDB: {gdb_path}")
+            for _, region in region_MAPPING:
+                if process_gdb(gdb_path, source_directory, sde_connection, batch_id, region, from_compressed=is_from_compressed):
+                    success_count += 1
+                    logger.info(f"Successfully processed GDB: {gdb_path}")
+                else:
+                    logger.error(f"Failed to process GDB: {gdb_path}")
         
         return success_count > 0
     
     else:
         logger.info(f"No GIS resources found in folder: {folder_path}")
         return False
-
 
 def main():
     """
