@@ -6,6 +6,8 @@ import arcpy
 from typing import List, Dict, Optional, Tuple, Set
 from datetime import datetime
 import logging
+import os
+from config import BASE_ROOT_PATH, region_MAPPING
 
 logger = logging.getLogger("GISIngestion.database")
 
@@ -285,7 +287,8 @@ def load_existing_versions_from_version_file(version_file_path: str = "layers_ve
                 
                 try:
                     # Parse the list of columns
-                    columns_list = ast.literal_eval(columns_str)
+                    columns_list = [col.strip() for col in columns_str.strip('[]').split(',')]
+                    # columns_list = ast.literal_eval(columns_list)
                     if not isinstance(columns_list, list):
                         continue
                     
@@ -319,7 +322,7 @@ def load_existing_versions_from_version_file(version_file_path: str = "layers_ve
 def initialize_ingestion_id_from_db(sde_connection: str) -> None:
     """
     Initialize the global ingestion ID counter from the database
-    Gets the maximum ingestion_id from All_regions_Excavations_header and continues from there
+    Gets the maximum ingestion_id from Add_dates_col_Excavations_header and continues from there
     
     Args:
         sde_connection: SDE connection path
@@ -328,12 +331,12 @@ def initialize_ingestion_id_from_db(sde_connection: str) -> None:
     
     try:
         # Ensure the table exists first
-        if not ensure_All_regions_Excavations_header_table(sde_connection):
-            logger.warning("Could not ensure All_regions_Excavations_header table exists, starting from ID 1")
+        if not ensure_Add_dates_col_Excavations_header_table(sde_connection):
+            logger.warning("Could not ensure Add_dates_col_Excavations_header table exists, starting from ID 1")
             return
         
         arcpy.env.workspace = sde_connection
-        table_name = "All_regions_Excavations_header"
+        table_name = "Add_dates_col_Excavations_header"
         table_path = f"{sde_connection}\\{table_name}"
         
         # Get maximum ingestion_id from the table
@@ -382,6 +385,27 @@ def get_ingestion_id_for_gdb(gdb_path: str) -> int:
     return ingestion_id
 
 
+def get_file_modify_date(file_path: str) -> Optional[datetime]:
+    """
+    Get the file system creation date of a GDB file (directory)
+    
+    Args:
+        file_path: Path to GDB directory
+        
+    Returns:
+        Creation datetime or None if error
+    """
+    try:
+        if os.path.exists(file_path):
+            # Use getctime() which returns creation time on Windows
+            creation_timestamp = os.path.getmtime(file_path)
+            return datetime.fromtimestamp(creation_timestamp)
+        else:
+            logger.warning(f"File path does not exist: {file_path}")
+            return None
+    except Exception as e:
+        logger.warning(f"Error getting creation date for {file_path}: {e}")
+        return None
 
 
 def create_versioned_table_from_gdb_fields(
@@ -396,7 +420,7 @@ def create_versioned_table_from_gdb_fields(
     
     Args:
         sde_connection: SDE connection path
-        table_name: Name of the table to create (e.g., All_Excavations_header_rows_poly_verA)
+        table_name: Name of the table to create (e.g., Add_dates_col_Excavations_header_rows_poly_verA)
         gdb_fields: List of field definitions from GDB
         geometry_type: Geometry type (Point, Polyline, Polygon, etc.)
         spatial_reference: Spatial reference object
@@ -682,9 +706,9 @@ def import_features_to_versioned_table(
 
 
 
-def ensure_All_regions_Excavations_header_table(sde_connection: str) -> bool:
+def ensure_Add_dates_col_Excavations_header_table(sde_connection: str) -> bool:
     """
-    Ensure the All_regions_regions_Excavations_header summary table exists
+    Ensure the Add_dates_col_regions_Excavations_header summary table exists
     
     Table structure:
     - Oid (auto)
@@ -713,7 +737,7 @@ def ensure_All_regions_Excavations_header_table(sde_connection: str) -> bool:
     """
     try:
         arcpy.env.workspace = sde_connection
-        table_name = "All_regions_Excavations_header"
+        table_name = "Add_dates_col_Excavations_header"
         table_path = f"{sde_connection}\\{table_name}"
         
         if arcpy.Exists(table_path):
@@ -740,6 +764,8 @@ def ensure_All_regions_Excavations_header_table(sde_connection: str) -> bool:
         arcpy.AddField_management(table_path, "main_folder_name", "TEXT", field_length=255)
         arcpy.AddField_management(table_path, "from_compressed", "SHORT")
         arcpy.AddField_management(table_path, "region", "SHORT")
+        arcpy.AddField_management(table_path, "create_folder_date", "DATE")
+        arcpy.AddField_management(table_path, "update_folder_date", "DATE")
 
         
         logger.info(f"Successfully created summary table '{table_name}' with all fields")
@@ -750,7 +776,7 @@ def ensure_All_regions_Excavations_header_table(sde_connection: str) -> bool:
         return False
 
 
-def update_All_regions_Excavations_header(
+def update_Add_dates_col_Excavations_header(
     sde_connection: str,
     ingestion_id: int,
     gdb_path: str,
@@ -761,7 +787,7 @@ def update_All_regions_Excavations_header(
     region: int = 0
 ) -> bool:
     """
-    Update or insert a row in the All_regions_Excavations_header summary table
+    Update or insert a row in the Add_dates_col_Excavations_header summary table
     
     Args:
         sde_connection: SDE connection path
@@ -775,17 +801,18 @@ def update_All_regions_Excavations_header(
         region: (short)code that is domain for the region the gdb is in.
         
     Returns:
-        True if successful
+        True if successful, "SKIP" if GDB should be skipped (file creation date unchanged)
     """
+    REGION_NAME = next((k for k, v in region_MAPPING.items() if v == region), None)
+    ROOT_PATH = os.path.join(BASE_ROOT_PATH, REGION_NAME.capitalize(), 'Excavations')
+    
     try:
-        import os
-        
         # Ensure table exists
-        if not ensure_All_regions_Excavations_header_table(sde_connection):
+        if not ensure_Add_dates_col_Excavations_header_table(sde_connection):
             return False
         
         arcpy.env.workspace = sde_connection
-        table_name = "All_regions_Excavations_header"
+        table_name = "Add_dates_col_Excavations_header"
         table_path = f"{sde_connection}\\{table_name}"
         
         # Extract GDB file name
@@ -805,35 +832,88 @@ def update_All_regions_Excavations_header(
         
         current_time = datetime.now()
         
-        # Check if record already exists for this ingestion_id
-        where_clause = f"ingestion_id = {ingestion_id}"
-        existing_count = 0
-        
-        with arcpy.da.SearchCursor(table_path, ["OBJECTID"], where_clause=where_clause) as cursor:
-            for row in cursor:
-                existing_count += 1
-        
-        if existing_count > 0:
-            # Update existing record
-            update_fields = ['update_date', 'update_user', 'poly_ver', 'line_ver', 'point_ver',
-                           'poly_count', 'line_count', 'point_count', 'from_compressed', 'region']
-            
-            with arcpy.da.UpdateCursor(table_path, update_fields, where_clause=where_clause) as cursor:
-                for row in cursor:
-                    cursor.updateRow([current_time, creation_user, poly_ver, line_ver, point_ver,
-                                     poly_count, line_count, point_count, from_compressed_value, region])
-            
-            logger.info(f"Updated summary record for ingestion_id {ingestion_id}")
+        # Get current file creation date
+        # file_path = ROOT_PATH + "\\" + gdb_path.split("\\")[-2] + "\\" 
+        if from_compressed:
+            print("found compressed now try to get its creation-date")
+            file_path = gdb_path
         else:
-            # Insert new record
+            file_path = ROOT_PATH + "\\" + gdb_path.split("\\")[-2] + "\\" + gdb_path.split("\\")[-1]
+        current_file_date = get_file_modify_date(file_path)
+        if current_file_date is None:
+            logger.warning(f"Could not get creation date for {gdb_path}, proceeding anyway")
+            current_file_date = current_time  # Fallback to current time
+        
+        # Check if record already exists for this GDB file (same name in same path)
+        # Escape single quotes in source_directory for SQL
+        escaped_source_dir = source_directory.replace("'", "''")
+        where_clause = f"f_name = '{gdb_filename}' AND s_dir = '{escaped_source_dir}'"
+        
+        existing_record = None
+        with arcpy.da.SearchCursor(table_path, ["update_date", "create_folder_date", "update_folder_date"], where_clause=where_clause) as cursor:
+            for row in cursor:
+                existing_record = {
+                    'update_date': row[0],
+                    'create_folder_date': row[1],
+                    'update_folder_date': row[2]
+                }
+                break  # Get first matching record
+        
+        if existing_record is not None:
+            # Record exists - check if we should update or skip
+            update_date = existing_record['update_date']
+            create_folder_date = existing_record['create_folder_date']
+            update_folder_date = existing_record['update_folder_date']
+            
+            should_update = False
+            
+            if update_date is None:
+                # First update - check if file creation date changed
+                if create_folder_date is None or current_file_date != create_folder_date:
+                    should_update = True
+                    new_update_date = current_time
+                    new_update_folder_date = current_file_date
+                else:
+                    # File creation date hasn't changed, skip
+                    logger.info(f"Skipping GDB {gdb_path} - file creation date unchanged (first update check)")
+                    return "SKIP"
+            else:
+                # Already updated before - check if file creation date changed
+                if update_folder_date is None or current_file_date != update_folder_date:
+                    should_update = True
+                    new_update_date = current_time
+                    new_update_folder_date = current_file_date
+                else:
+                    # File creation date hasn't changed, skip
+                    logger.info(f"Skipping GDB {gdb_path} - file creation date unchanged (subsequent update check)")
+                    return "SKIP"
+            
+            if should_update:
+                # Update existing record
+                update_fields = ['update_date', 'update_user', 'poly_ver', 'line_ver', 'point_ver',
+                               'poly_count', 'line_count', 'point_count', 'from_compressed', 'region',
+                               'update_folder_date']
+                
+                with arcpy.da.UpdateCursor(table_path, update_fields, where_clause=where_clause) as cursor:
+                    for row in cursor:
+                        cursor.updateRow([new_update_date, creation_user, poly_ver, line_ver, point_ver,
+                                         poly_count, line_count, point_count, from_compressed_value, region,
+                                         new_update_folder_date])
+                
+                logger.info(f"Updated summary record for GDB {gdb_filename} in {source_directory}")
+        else:
+            # Insert new record - first creation
             insert_fields = ['creation_date', 'update_date', 'creation_user', 'update_user',
                            'poly_ver', 'line_ver', 'point_ver', 'ingestion_id',
-                           'poly_count', 'line_count', 'point_count', 'f_name', 's_dir', 'main_folder_name', 'from_compressed', 'region']
+                           'poly_count', 'line_count', 'point_count', 'f_name', 's_dir', 'main_folder_name', 
+                           'from_compressed', 'region', 'create_folder_date', 'update_folder_date']
             
             with arcpy.da.InsertCursor(table_path, insert_fields) as cursor:
-                cursor.insertRow([current_time, current_time, creation_user, creation_user,
+                cursor.insertRow([current_time, None, creation_user, creation_user,
                                  poly_ver, line_ver, point_ver, ingestion_id,
-                                 poly_count, line_count, point_count, gdb_filename, source_directory, main_folder_name, from_compressed_value,  region])
+                                 poly_count, line_count, point_count, gdb_filename, source_directory, 
+                                 main_folder_name, from_compressed_value, region,
+                                 current_file_date, None])
             
             logger.info(f"Inserted new summary record for ingestion_id {ingestion_id}")
         

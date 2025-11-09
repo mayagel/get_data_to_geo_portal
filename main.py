@@ -12,7 +12,7 @@ import shutil
 import arcpy
 
 # Import local modules
-from config import SDE_CONNECTION, ROOT_PATH, FOLDER_PREFIX, GIS_FOLDER_NAME, REGION_NAME, region_MAPPING
+from config import SDE_CONNECTION, BASE_ROOT_PATH, FOLDER_PREFIX, region_MAPPING
 from logger_setup import setup_logger
 from database import (
     connect_to_gis,
@@ -23,7 +23,7 @@ from database import (
     get_ingestion_id_for_gdb,
     create_versioned_table_from_gdb_fields,
     import_features_to_versioned_table,
-    update_All_regions_Excavations_header,
+    update_Add_dates_col_Excavations_header,
     initialize_ingestion_id_from_db
     )
 from file_scanner import (
@@ -77,7 +77,7 @@ def process_gdb(
     sde_connection: str,
     batch_id: int,
     region: int = 101,
-    from_compressed: bool = False,
+    from_compressed: bool = False
 ) -> bool:
     """
     Process a File Geodatabase using new versioned table structure
@@ -93,7 +93,7 @@ def process_gdb(
         True if processing was successful
     """
     logger.info(f"Processing GDB: {gdb_path}")
-    
+    REGION_NAME = next((k for k, v in region_MAPPING.items() if v == region), None)
     # Get ingestion ID for this GDB
     ingestion_id = get_ingestion_id_for_gdb(gdb_path)
     logger.info(f"Using ingestion ID: {ingestion_id} for GDB: {gdb_path}")
@@ -145,8 +145,8 @@ def process_gdb(
             # Get or create version for this geometry + column combination
             version = get_or_create_version(geom_type_norm, column_set, sde_connection, gdb_path, source_directory)
             
-            # Build table name: All_Excavations_header_rows_{geom}_{ver}
-            table_name = f"All_Excavations_header_rows_{geom_type_norm}_{version}"
+            # Build table name: Add_dates_col_Excavations_header_rows_{geom}_{ver}
+            table_name = f"Add_dates_col_Excavations_header_rows_{geom_type_norm}_{version}"
             
             logger.info(f"Layer '{layer_name}' -> Table '{table_name}' (ingestion_id: {ingestion_id})")
             
@@ -192,8 +192,8 @@ def process_gdb(
         
         # Update summary table
         if layer_stats:
-            logger.info(f"Updating All_regions_Excavations_header for ingestion_id {ingestion_id} in the region {REGION_NAME}")
-            update_All_regions_Excavations_header(
+            logger.info(f"Updating Add_dates_col_Excavations_header for ingestion_id {ingestion_id} in the region {REGION_NAME}")
+            result = update_Add_dates_col_Excavations_header(
                 sde_connection=sde_connection,
                 ingestion_id=ingestion_id,
                 gdb_path=gdb_path,
@@ -203,6 +203,10 @@ def process_gdb(
                 from_compressed=from_compressed,
                 region=region_MAPPING[REGION_NAME]
             )
+            
+            if result == "SKIP":
+                logger.info(f"Skipped updating header for GDB {gdb_path} - file creation date unchanged, continuing to next GDB")
+                # Note: Layers were already processed, but header update was skipped
         
         return True
         
@@ -210,7 +214,7 @@ def process_gdb(
         logger.error(f"Error processing GDB '{gdb_path}': {e}")
         return False
 
-def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool:
+def process_folder(folder_path: str, sde_connection: str, batch_id: int, region_code: int) -> bool:
     """
     Process a single folder (looking for GIS resources)
     
@@ -305,13 +309,12 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
         success_count = 0
         for gdb_path in all_gdb_paths:
             is_from_compressed = gdb_path in gdbs_from_compressed
-            logger.info(f"Processing GDB: {gdb_path} (from_compressed: {is_from_compressed})")
-            for _, region in region_MAPPING:
-                if process_gdb(gdb_path, source_directory, sde_connection, batch_id, region, from_compressed=is_from_compressed):
-                    success_count += 1
-                    logger.info(f"Successfully processed GDB: {gdb_path}")
-                else:
-                    logger.error(f"Failed to process GDB: {gdb_path}")
+            # Get compressed file name if from compressed
+            if process_gdb(gdb_path, source_directory, sde_connection, batch_id, region_code, from_compressed=is_from_compressed):
+                success_count += 1
+                logger.info(f"Successfully processed GDB: {gdb_path}")
+            else:
+                logger.error(f"Failed to process GDB: {gdb_path}")
         
         return success_count > 0
     
@@ -319,15 +322,19 @@ def process_folder(folder_path: str, sde_connection: str, batch_id: int) -> bool
         logger.info(f"No GIS resources found in folder: {folder_path}")
         return False
 
-def main():
+def main(region_code):
     """
     Main entry point for the script
     """
     logger.info("=" * 80)
     logger.info("Starting GIS Data Ingestion Process")
     logger.info("=" * 80)
+
+    REGION_NAME = next((k for k, v in region_MAPPING.items() if v == region_code), None)
+    ROOT_PATH = os.path.join(BASE_ROOT_PATH, REGION_NAME.capitalize(), 'Excavations')
     
     # Check if root path exists
+    
     if not os.path.exists(ROOT_PATH):
         logger.error(f"Root path does not exist: {ROOT_PATH}")
         logger.error("Please update ROOT_PATH in config.py")
@@ -447,7 +454,7 @@ def main():
         success_count = 0
         for idx, folder_path in enumerate(folders_to_process, 1):
             try:
-                if process_folder(folder_path, sde_conn, batch_id):
+                if process_folder(folder_path, sde_conn, batch_id, region_code):
                     success_count += 1
             except Exception as e:
                 logger.error(f"Error processing folder '{folder_path}': {e}")
@@ -474,4 +481,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    for _, region_code in region_MAPPING.items():
+        logger.info(f"Processing for region: {region_code}")
+        main(region_code)
